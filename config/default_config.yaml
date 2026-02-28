@@ -1,0 +1,43 @@
+# Obsidian MCP Server Configuration
+mcp:
+  server_command: "npx"
+  server_args: ["-y", "@modelcontextprotocol/server-obsidian", "/path/to/vault"]
+  timeout: 30  # seconds
+
+# Claude API Configuration
+claude:
+  api_key_env: "ANTHROPIC_API_KEY"  # Environment variable name
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 4000
+  temperature: 0.7
+
+# Scanning Configuration
+scanning:
+  recent_timeframe: 7  # days (1 week)
+  check_interval: 300  # seconds (5 minutes for cron)
+
+# Rate Limiting
+rate_limit:
+  max_requests_per_hour: 5
+
+# Response Configuration
+response:
+  max_length: 5000  # characters
+  include_timestamp: true
+  note_suffix: "_response_"
+
+# Notification Configuration
+notifications:
+  enabled: true
+  on_success: true
+  on_error: true
+
+# Logging Configuration
+logging:
+  level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/agent.log"
+  max_size: 10485760  # 10MB
+  backup_count: 5
+
+# Dry Run Mode
+dry_run: false  # If true, show what would be done without executing

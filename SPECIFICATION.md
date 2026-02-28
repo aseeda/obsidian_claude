@@ -1,0 +1,625 @@
+# Obsidian-Claude Automation Tool - Technical Specification
+
+**Version:** 1.0
+**Date:** 2026-02-27
+**Status:** Draft
+
+---
+
+## 1. Overview
+
+### 1.1 Purpose
+This tool automatically processes natural language requests embedded in Obsidian notes using Claude AI via the Obsidian MCP server.
+
+### 1.2 Key Features
+- Monitors recently modified Obsidian notes for `@claude` requests
+- Executes approved tool calls via Claude AI
+- Creates linked response notes with results
+- Prevents re-processing and enforces rate limits
+- Runs as a scheduled background task
+
+---
+
+## 2. System Architecture
+
+### 2.1 Technology Stack
+- **Language:** Python 3.10+
+- **MCP Client:** Official MCP Python SDK
+- **AI Provider:** Anthropic Claude API
+- **Scheduling:** Cron (Unix/macOS) or Task Scheduler (Windows)
+- **Configuration:** YAML or TOML config files
+- **Logging:** Python logging module
+- **Notifications:** Platform-specific (notify-send, osascript, Windows toast)
+
+### 2.2 Components
+
+```
+obsidian-claude-agent/
+├── src/
+│   ├── main.py                 # Entry point, orchestration
+│   ├── note_scanner.py         # Find and parse notes
+│   ├── request_parser.py       # Extract @claude requests
+│   ├── claude_client.py        # Claude API integration
+│   ├── mcp_client.py           # MCP server communication
+│   ├── response_writer.py      # Create response notes
+│   ├── rate_limiter.py         # Request throttling
+│   ├── notifier.py             # Desktop notifications
+│   └── config.py               # Configuration management
+├── config/
+│   ├── default_config.yaml     # Default settings
+│   └── vault_permissions.yaml  # Per-vault tool permissions
+├── logs/
+│   └── agent.log               # Verbose logging
+├── state/
+│   └── processed_requests.json # Track processed requests
+├── tests/
+│   └── ...                     # Unit tests
+├── requirements.txt            # Python dependencies
+├── setup.py                    # Installation script
+└── README.md                   # User documentation
+```
+
+---
+
+## 3. Functional Requirements
+
+### 3.1 Note Discovery (FR1)
+**Description:** Identify recently modified or created notes containing unprocessed requests.
+
+**Acceptance Criteria:**
+- System SHALL query Obsidian MCP server for notes modified or created in the last week
+- System SHALL exclude notes in code blocks or HTML comments
+- System SHALL track processed requests to avoid re-execution
+
+**Implementation:**
+```python
+# Use MCP search_notes tool with time filter
+recent_notes = mcp_client.search_notes(
+    modified_since=datetime.now() - timedelta(weeks=1)
+)
+```
+
+### 3.2 Request Detection (FR2)
+**Description:** Identify and extract `@claude` requests from note content.
+
+**Syntax Support:**
+- `@claude [request text]` (same line)
+- `@claude: [request text]` (with colon)
+- `@claude - [request text]` (with dash)
+- `@claude """[multi-line request]"""`(triple quotes)
+
+**Parsing Rules:**
+1. Case-sensitive: Only match lowercase `@claude`
+2. Ignore matches inside:
+   - Markdown code blocks (triple backticks)
+   - HTML comments (`<!-- -->`)
+3. Extract request text on same line OR within `"""..."""` immediately following
+4. Process only FIRST unprocessed request per note per run
+
+**Example:**
+```markdown
+# Meeting Notes
+
+@claude summarize the key action items from this meeting
+
+@claude: """
+Search for recent papers on transformer architectures
+and create a summary table
+"""
+
+<!-- @claude this should be ignored -->
+
+```python
+# @claude this should also be ignored
+```
+```
+
+### 3.3 Request Processing (FR3)
+**Description:** Send extracted request to Claude with tool restrictions.
+
+**Allowed Tools (Configurable per Vault):**
+- `obsidian_read_note` - Read files within vault
+- `obsidian_search_notes` - Search within vault
+- `web_search` - Web search (informational)
+- `web_fetch` - Fetch specific URLs
+- `obsidian_create_note` - Write new notes in vault
+
+**Disallowed Tools:**
+- `obsidian_update_note` - Modify existing notes
+- `bash` - Execute shell commands
+- Any other tools not explicitly allowlisted
+
+**Process Flow:**
+1. Send request to Claude API with allowed tools
+2. Monitor tool usage during execution
+3. If unauthorized tool requested:
+   - Cancel execution
+   - Log violation
+   - Write error message to note (see FR5)
+4. If authorized:
+   - Execute tool calls via MCP
+   - Collect response
+   - Proceed to FR4
+
+### 3.4 Response Creation (FR4)
+**Description:** Create new note with Claude's response and link from source note.
+
+**Response Note Naming:**
+```
+<source_note_name>_response_<timestamp>.md
+```
+
+**Example:**
+- Source note: `weekly_planning.md`
+- Response note: `weekly_planning_response_20260227_153045.md`
+
+**Response Note Format:**
+```markdown
+# Claude Response
+
+**Source Note:** [[weekly_planning]]
+**Request:** [Original request text]
+**Timestamp:** 2026-02-27 15:30:45
+**Status:** Success
+
+---
+
+## Response
+
+[Claude's full response here]
+
+---
+
+*Generated by Obsidian-Claude Agent*
+```
+
+**Source Note Update:**
+Replace `@claude` with `@claude-done` and add link:
+
+Before:
+```markdown
+@claude summarize this document
+```
+
+After:
+```markdown
+@claude-done summarize this document
+[[meeting_notes_response_20260227_153045]]
+```
+
+### 3.5 Error Handling (FR5)
+**Description:** Handle failures gracefully and inform user.
+
+**Error Scenarios:**
+
+1. **Unauthorized Tool Requested:**
+```markdown
+@claude-error summarize this document
+**Error:** Unauthorized tool requested: `obsidian_update_note`
+Tool is not allowed in vault configuration.
+```
+
+2. **API Failure:**
+```markdown
+@claude-error analyze this data
+**Error:** Claude API unavailable. Please try again later.
+Timestamp: 2026-02-27 15:30:45
+```
+
+3. **Rate Limit Exceeded:**
+```markdown
+@claude-error create summary
+**Error:** Rate limit exceeded (5 requests/hour).
+Next available: 2026-02-27 16:00:00
+```
+
+4. **Parsing Error:**
+```markdown
+@claude-error """unclosed quote
+**Error:** Malformed request - unterminated triple quote.
+```
+
+### 3.6 State Management (FR6)
+**Description:** Track processed requests to prevent re-execution.
+
+**State File:** `state/processed_requests.json`
+
+```json
+{
+  "processed": [
+    {
+      "note_path": "weekly_planning.md",
+      "request_hash": "a3f5b9c8...",
+      "timestamp": "2026-02-27T15:30:45Z",
+      "status": "success",
+      "response_note": "weekly_planning_response_20260227_153045.md"
+    }
+  ],
+  "rate_limit": {
+    "requests_this_hour": 3,
+    "hour_started": "2026-02-27T15:00:00Z"
+  }
+}
+```
+
+**Request Identification:**
+- Hash original `@claude` line + note path
+- Skip if hash exists in processed list
+- Clean up entries older than 7 days
+
+---
+
+## 4. Non-Functional Requirements
+
+### 4.1 Performance
+- **Execution Time:** Complete full scan + processing in < 60 seconds
+- **MCP Latency:** Handle MCP server response times up to 10s
+- **Memory:** Run in < 100MB RAM for typical vaults (< 1000 notes)
+
+### 4.2 Reliability
+- **Error Recovery:** Continue processing other notes if one fails
+- **Crash Recovery:** Safe to kill mid-execution (idempotent operations)
+- **State Consistency:** Atomic state file updates
+
+### 4.3 Security
+- **API Keys:** Store in environment variables or secure config
+- **Tool Restrictions:** Enforce allowlist at runtime, not just config
+- **Path Traversal:** Validate all file paths from MCP server
+- **Injection Prevention:** Sanitize note content before Claude API calls
+
+### 4.4 Usability
+- **Configuration:** Simple YAML config with sensible defaults
+- **Installation:** `pip install obsidian-claude-agent`
+- **Setup:** < 5 minutes from install to first run
+- **Logging:** Clear, timestamped logs for debugging
+- **Notifications:** Non-intrusive desktop alerts
+
+### 4.5 Maintainability
+- **Code Quality:** Type hints, docstrings, < 200 lines per module
+- **Testing:** > 80% code coverage with unit tests
+- **Documentation:** README, API docs, configuration guide
+- **Versioning:** Semantic versioning (MAJOR.MINOR.PATCH)
+
+---
+
+## 5. Configuration
+
+### 5.1 Main Configuration (`config/default_config.yaml`)
+
+```yaml
+# Obsidian MCP Server Configuration
+mcp:
+  server_command: "npx"
+  server_args: ["-y", "@modelcontextprotocol/server-obsidian", "/path/to/vault"]
+  timeout: 30  # seconds
+
+# Claude API Configuration
+claude:
+  api_key_env: "ANTHROPIC_API_KEY"  # Environment variable name
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 4000
+  temperature: 0.7
+
+# Scanning Configuration
+scanning:
+  recent_timeframe: 7  # days (1 week)
+  check_interval: 300  # seconds (5 minutes for cron)
+
+# Rate Limiting
+rate_limit:
+  max_requests_per_hour: 5
+
+# Response Configuration
+response:
+  max_length: 5000  # characters
+  include_timestamp: true
+  note_suffix: "_response_"
+
+# Notification Configuration
+notifications:
+  enabled: true
+  on_success: true
+  on_error: true
+
+# Logging Configuration
+logging:
+  level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/agent.log"
+  max_size: 10485760  # 10MB
+  backup_count: 5
+
+# Dry Run Mode
+dry_run: false  # If true, show what would be done without executing
+```
+
+### 5.2 Vault Permissions (`config/vault_permissions.yaml`)
+
+```yaml
+# Default permissions for all vaults
+default:
+  allowed_tools:
+    - obsidian_read_note
+    - obsidian_search_notes
+    - obsidian_create_note
+    - web_search
+    - web_fetch
+
+# Per-vault overrides (if managing multiple vaults)
+vaults:
+  "/Users/username/Documents/PersonalVault":
+    allowed_tools:
+      - obsidian_read_note
+      - obsidian_search_notes
+      - obsidian_create_note
+      - web_search
+      - web_fetch
+
+  "/Users/username/Documents/WorkVault":
+    allowed_tools:
+      - obsidian_read_note
+      - obsidian_search_notes
+      # Note: Restricted tools for work vault
+```
+
+---
+
+## 6. Operational Details
+
+### 6.1 Scheduling
+
+**Cron (macOS/Linux):**
+```bash
+# Run every 5 minutes
+*/5 * * * * /usr/local/bin/obsidian-claude-agent run >> /var/log/obsidian-claude.log 2>&1
+```
+
+**Systemd Timer (Linux):**
+```ini
+# /etc/systemd/system/obsidian-claude-agent.timer
+[Unit]
+Description=Obsidian Claude Agent Timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=obsidian-claude-agent.service
+
+[Install]
+WantedBy=timers.target
+```
+
+**Task Scheduler (Windows):**
+- GUI configuration: Trigger every 5 minutes
+- Action: Run `obsidian-claude-agent.exe run`
+
+### 6.2 Desktop Notifications
+
+**Success:**
+```
+Title: Obsidian Claude Agent
+Message: Processed @claude request in "weekly_planning.md"
+Icon: ✓
+```
+
+**Error:**
+```
+Title: Obsidian Claude Agent - Error
+Message: Failed to process request in "meeting_notes.md" - Rate limit exceeded
+Icon: ⚠
+```
+
+**API Unavailable:**
+```
+Title: Obsidian Claude Agent - Service Issue
+Message: Claude API unavailable. Will retry on next run.
+Icon: ℹ
+```
+
+### 6.3 Logging
+
+**Log Format:**
+```
+2026-02-27 15:30:45,123 - INFO - [main] Starting Obsidian Claude Agent v1.0.0
+2026-02-27 15:30:45,234 - DEBUG - [mcp_client] Connecting to MCP server...
+2026-02-27 15:30:46,345 - INFO - [note_scanner] Found 3 recently modified notes
+2026-02-27 15:30:46,456 - DEBUG - [request_parser] Parsing note: weekly_planning.md
+2026-02-27 15:30:46,567 - INFO - [request_parser] Found @claude request: "summarize action items"
+2026-02-27 15:30:46,678 - DEBUG - [rate_limiter] Request count: 3/5 this hour
+2026-02-27 15:30:46,789 - INFO - [claude_client] Sending request to Claude API
+2026-02-27 15:30:48,890 - DEBUG - [claude_client] Claude requested tool: obsidian_read_note
+2026-02-27 15:30:48,901 - INFO - [mcp_client] Executing allowed tool: obsidian_read_note
+2026-02-27 15:30:50,012 - INFO - [response_writer] Creating response note
+2026-02-27 15:30:50,123 - INFO - [response_writer] Created: weekly_planning_response_20260227_153045.md
+2026-02-27 15:30:50,234 - INFO - [notifier] Sent desktop notification
+2026-02-27 15:30:50,345 - INFO - [main] Run complete - processed 1 request
+```
+
+---
+
+## 7. Command Line Interface
+
+### 7.1 Commands
+
+```bash
+# Run single scan (for cron/scheduler)
+obsidian-claude-agent run
+
+# Dry run (show what would be done)
+obsidian-claude-agent run --dry-run
+
+# Manual trigger with custom config
+obsidian-claude-agent run --config /path/to/config.yaml
+
+# Initialize configuration
+obsidian-claude-agent init
+
+# Check system status
+obsidian-claude-agent status
+
+# View recent logs
+obsidian-claude-agent logs --tail 50
+
+# Clear processed request history
+obsidian-claude-agent reset --confirm
+```
+
+### 7.2 Exit Codes
+
+- `0`: Success
+- `1`: General error
+- `2`: Configuration error
+- `3`: MCP server connection failed
+- `4`: Claude API error
+- `5`: Rate limit exceeded
+
+---
+
+## 8. Error Scenarios & Handling
+
+| Error | Cause | Handling | User Impact |
+|-------|-------|----------|-------------|
+| MCP connection failed | Server not running | Log error, notify user, exit | No requests processed |
+| Claude API unavailable | Network/API issue | Log error, notify user, skip run | Retry on next schedule |
+| Rate limit exceeded | > 5 req/hour | Mark request as pending, notify | Request queued for next hour |
+| Unauthorized tool | Tool not in allowlist | Write error to note, mark as done | User sees error message |
+| Malformed request | Invalid syntax | Write error to note, mark as done | User sees parsing error |
+| Response too long | > 5000 chars | Truncate + add "[truncated]" note | User sees partial response |
+| Note write failed | Permission/MCP issue | Log error, keep request unprocessed | Retry on next run |
+
+---
+
+## 9. Testing Strategy
+
+### 9.1 Unit Tests
+- Request parsing (all syntax variants)
+- Rate limiting logic
+- Configuration loading
+- Request hash generation
+- Error message formatting
+
+### 9.2 Integration Tests
+- MCP server communication
+- Claude API interaction (mocked)
+- End-to-end request processing
+- State file persistence
+- Notification delivery
+
+### 9.3 Manual Testing Scenarios
+1. Single request in note
+2. Multiple requests (only first processed)
+3. Request in code block (ignored)
+4. Request in HTML comment (ignored)
+5. Multi-line request with triple quotes
+6. Unauthorized tool request
+7. Rate limit exceeded
+8. Malformed triple quotes
+9. Very long response
+10. MCP server offline
+
+---
+
+## 10. Deployment & Distribution
+
+### 10.1 Installation
+
+**Via PyPI:**
+```bash
+pip install obsidian-claude-agent
+```
+
+**From Source:**
+```bash
+git clone https://github.com/yourusername/obsidian-claude-agent
+cd obsidian-claude-agent
+pip install -e .
+```
+
+### 10.2 Initial Setup
+
+```bash
+# 1. Install
+pip install obsidian-claude-agent
+
+# 2. Initialize configuration
+obsidian-claude-agent init
+# Prompts for: Vault path, API key, allowed tools
+
+# 3. Test run
+obsidian-claude-agent run --dry-run
+
+# 4. Setup scheduling (example for macOS)
+crontab -e
+# Add: */5 * * * * /usr/local/bin/obsidian-claude-agent run
+```
+
+### 10.3 Dependencies
+
+```txt
+# requirements.txt
+anthropic>=0.18.0
+pyyaml>=6.0
+python-dateutil>=2.8.2
+mcp>=0.1.0
+plyer>=2.1.0  # Cross-platform notifications
+```
+
+---
+
+## 11. Future Enhancements (Out of Scope for v1.0)
+
+- [ ] Web dashboard for monitoring
+- [ ] Response history/versioning
+- [ ] Undo/rollback functionality
+- [ ] Support for `@claude-private` (encrypted responses)
+- [ ] Batch processing mode
+- [ ] Custom tool definitions per vault
+- [ ] Integration with Obsidian plugins
+- [ ] Response templates
+- [ ] Usage statistics and analytics
+- [ ] Multi-language support
+
+---
+
+## 12. Open Questions & Clarifications Needed
+
+### 12.1 Timestamp Format in Filenames
+**Current:** `<source_note>_response_<timestamp>.md`
+**Question:** Timestamp format preference?
+- `20260227_153045` (compact, sortable)
+- `2026-02-27_15-30-45` (readable)
+- `20260227153045` (no separators)
+
+**Recommendation:** `20260227_153045` for balance of readability and sorting.
+
+### 12.2 Multiple Requests in Same Note
+**Current:** Process only first unprocessed request
+**Question:** If user adds second `@claude` request later, will it be processed on next run?
+
+**Answer:** Yes - once first is marked `@claude-done`, the second becomes the "first unprocessed" and will be handled on next scan.
+
+---
+
+## 13. Success Criteria
+
+### 13.1 Version 1.0 is successful if:
+- [ ] Successfully processes `@claude` requests in Obsidian notes
+- [ ] Enforces tool restrictions correctly
+- [ ] Creates linked response notes in expected format
+- [ ] Prevents re-processing of completed requests
+- [ ] Respects rate limits (5 requests/hour)
+- [ ] Handles errors gracefully with user-friendly messages
+- [ ] Runs reliably on schedule (cron/timer)
+- [ ] Provides desktop notifications
+- [ ] Documented for easy installation and setup
+- [ ] Cross-platform (macOS, Linux, Windows)
+
+### 13.2 User Acceptance Tests
+1. User writes `@claude summarize this` in note → Response note created within 5 minutes
+2. User writes request with unauthorized tool → Error message added to note
+3. User exceeds rate limit → Notification shown, request queued
+4. User adds request in code block → Ignored (not processed)
+5. Tool runs reliably for 1 week without manual intervention
+
+---
+
+**End of Specification**
