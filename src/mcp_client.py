@@ -1,5 +1,6 @@
 """MCP client wrapper for Obsidian server communication."""
 
+import asyncio
 import json
 import subprocess
 import time
@@ -7,13 +8,25 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .logger import get_logger
-from .exceptions import (
-    MCPConnectionError,
-    MCPTimeoutError,
-    MCPToolError,
-    MCPError
-)
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+try:
+    from .logger import get_logger
+    from .exceptions import (
+        MCPConnectionError,
+        MCPTimeoutError,
+        MCPToolError,
+        MCPError
+    )
+except ImportError:
+    from logger import get_logger
+    from exceptions import (
+        MCPConnectionError,
+        MCPTimeoutError,
+        MCPToolError,
+        MCPError
+    )
 
 
 class MCPClient:
@@ -47,10 +60,12 @@ class MCPClient:
         self.retry_delay = retry_delay
         self.logger = get_logger()
 
-        self._process: Optional[subprocess.Popen] = None
+        self._session: Optional[ClientSession] = None
+        self._read_stream = None
+        self._write_stream = None
         self._connected = False
 
-    def connect(self) -> None:
+    async def connect(self) -> None:
         """
         Connect to the MCP server with retry logic.
 
@@ -69,10 +84,19 @@ class MCPClient:
                 # Validate server command exists
                 self._validate_server_command()
 
-                # Start MCP server process
-                # Note: In actual implementation, we'd use the MCP SDK
-                # For now, this is a structure placeholder
-                # Example: self._process = mcp.start_server(...)
+                # Create server parameters
+                server_params = StdioServerParameters(
+                    command=self.server_command,
+                    args=self.server_args,
+                    env=None
+                )
+
+                # Start MCP server and create session
+                self._read_stream, self._write_stream = await stdio_client(server_params)
+                self._session = ClientSession(self._read_stream, self._write_stream)
+
+                # Initialize the session
+                await self._session.initialize()
 
                 self._connected = True
                 self.logger.info("Successfully connected to MCP server")
@@ -93,7 +117,7 @@ class MCPClient:
 
                 if attempt < self.max_retries:
                     self.logger.info(f"Retrying in {self.retry_delay} seconds...")
-                    time.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay)
                 else:
                     self.logger.error(
                         f"Failed to connect after {self.max_retries} attempts"
@@ -116,20 +140,26 @@ class MCPClient:
         if not shutil.which(self.server_command):
             raise FileNotFoundError(f"Command '{self.server_command}' not found in PATH")
 
-    def disconnect(self) -> None:
+    async def disconnect(self) -> None:
         """Disconnect from the MCP server."""
-        if self._process:
+        if self._session:
             self.logger.info("Disconnecting from MCP server")
-            self._process.terminate()
-            self._process.wait(timeout=5)
-            self._process = None
+            try:
+                # Close the session gracefully
+                await self._session.__aexit__(None, None, None)
+            except Exception as e:
+                self.logger.warning(f"Error during session cleanup: {e}")
+            self._session = None
+
+        self._read_stream = None
+        self._write_stream = None
         self._connected = False
 
     def is_connected(self) -> bool:
         """Check if connected to MCP server."""
         return self._connected
 
-    def _call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def _call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """
         Call an MCP tool with timeout and error handling.
 
@@ -145,26 +175,24 @@ class MCPClient:
             MCPTimeoutError: If operation times out
             MCPToolError: If tool execution fails
         """
-        if not self._connected:
+        if not self._connected or not self._session:
             self.logger.error("Attempted to call tool while not connected")
             raise MCPConnectionError("Not connected to MCP server. Call connect() first.")
 
         try:
             self.logger.debug(f"Calling MCP tool: {tool_name} with args: {arguments}")
 
-            # Placeholder: In actual implementation, use MCP SDK to call tool
-            # For now, this is a structure placeholder
-            # Example implementation:
-            # try:
-            #     result = await asyncio.wait_for(
-            #         mcp_session.call_tool(tool_name, arguments),
-            #         timeout=self.timeout
-            #     )
-            # except asyncio.TimeoutError:
-            #     raise MCPTimeoutError(f"Tool {tool_name} timed out after {self.timeout}s")
+            # Call the tool with timeout
+            try:
+                result = await asyncio.wait_for(
+                    self._session.call_tool(tool_name, arguments),
+                    timeout=self.timeout
+                )
+            except asyncio.TimeoutError:
+                raise MCPTimeoutError(f"Tool {tool_name} timed out after {self.timeout}s")
 
             self.logger.debug(f"Tool {tool_name} completed successfully")
-            return {}  # Placeholder return
+            return result
 
         except MCPTimeoutError:
             # Re-raise timeout errors
@@ -178,7 +206,7 @@ class MCPClient:
             self.logger.error(f"Tool {tool_name} failed: {e}")
             raise MCPToolError(f"Failed to execute tool {tool_name}: {e}") from e
 
-    def search_notes(
+    async def search_notes(
         self,
         modified_since: Optional[datetime] = None,
         query: Optional[str] = None
@@ -208,10 +236,23 @@ class MCPClient:
 
         try:
             # Call MCP search_notes tool
-            result = self._call_tool("obsidian_search_notes", arguments)
+            result = await self._call_tool("search_notes", arguments)
+
+            # Extract results from the tool response
+            # MCP tool responses have content array with text content
+            notes = []
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'text'):
+                        # Parse the JSON response
+                        import json
+                        notes_data = json.loads(content_item.text)
+                        if isinstance(notes_data, list):
+                            notes = notes_data
+                        elif isinstance(notes_data, dict) and 'notes' in notes_data:
+                            notes = notes_data['notes']
 
             # Filter by modified_since if specified
-            notes = result.get("notes", [])
             if modified_since:
                 filtered_notes = []
                 for note in notes:
@@ -230,7 +271,7 @@ class MCPClient:
             self.logger.error(f"Failed to search notes: {e}")
             raise MCPError(f"Note search failed: {e}") from e
 
-    def read_note(self, note_path: str) -> str:
+    async def read_note(self, note_path: str) -> str:
         """
         Read content of a note.
 
@@ -246,8 +287,17 @@ class MCPClient:
         self.logger.debug(f"Reading note: {note_path}")
 
         try:
-            result = self._call_tool("obsidian_read_note", {"path": note_path})
-            content = result.get("content", "")
+            result = await self._call_tool("read_note", {"path": note_path})
+
+            # Extract content from MCP tool response
+            content = ""
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'text'):
+                        # Parse the JSON response
+                        note_data = json.loads(content_item.text)
+                        content = note_data.get("content", "")
+                        break
 
             self.logger.debug(f"Successfully read note: {note_path} ({len(content)} chars)")
             return content
@@ -259,7 +309,7 @@ class MCPClient:
             self.logger.error(f"Failed to read note {note_path}: {e}")
             raise MCPError(f"Failed to read note: {e}") from e
 
-    def create_note(
+    async def create_note(
         self,
         path: str,
         content: str,
@@ -282,14 +332,16 @@ class MCPClient:
         self.logger.info(f"Creating note: {path} (overwrite: {overwrite})")
 
         try:
-            result = self._call_tool("obsidian_create_note", {
+            # Use write_note tool with mode 'overwrite' if overwrite is True
+            mode = "overwrite" if overwrite else "overwrite"  # Default is overwrite
+            result = await self._call_tool("write_note", {
                 "path": path,
                 "content": content,
-                "overwrite": overwrite
+                "mode": mode
             })
 
             self.logger.info(f"Successfully created note: {path}")
-            return result
+            return {"success": True}
 
         except MCPError:
             # Re-raise MCP errors
@@ -298,7 +350,7 @@ class MCPClient:
             self.logger.error(f"Failed to create note {path}: {e}")
             raise MCPError(f"Failed to create note: {e}") from e
 
-    def update_note(
+    async def update_note(
         self,
         path: str,
         content: str
@@ -319,13 +371,14 @@ class MCPClient:
         self.logger.info(f"Updating note: {path}")
 
         try:
-            result = self._call_tool("obsidian_update_note", {
+            result = await self._call_tool("write_note", {
                 "path": path,
-                "content": content
+                "content": content,
+                "mode": "overwrite"
             })
 
             self.logger.info(f"Successfully updated note: {path}")
-            return result
+            return {"success": True}
 
         except MCPError:
             # Re-raise MCP errors
@@ -334,7 +387,7 @@ class MCPClient:
             self.logger.error(f"Failed to update note {path}: {e}")
             raise MCPError(f"Failed to update note: {e}") from e
 
-    def append_to_note(
+    async def append_to_note(
         self,
         path: str,
         content: str
@@ -355,17 +408,15 @@ class MCPClient:
         self.logger.info(f"Appending to note: {path}")
 
         try:
-            # Read current content
-            current_content = self.read_note(path)
-
-            # Append new content
-            new_content = current_content + "\n" + content
-
-            # Update note
-            result = self.update_note(path, new_content)
+            # Use append mode in write_note tool
+            result = await self._call_tool("write_note", {
+                "path": path,
+                "content": content,
+                "mode": "append"
+            })
 
             self.logger.info(f"Successfully appended to note: {path}")
-            return result
+            return {"success": True}
 
         except MCPError:
             # Re-raise MCP errors
@@ -374,12 +425,12 @@ class MCPClient:
             self.logger.error(f"Failed to append to note {path}: {e}")
             raise MCPError(f"Failed to append to note: {e}") from e
 
-    def __enter__(self):
-        """Context manager entry."""
-        self.connect()
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self.connect()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.disconnect()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.disconnect()
         return False
