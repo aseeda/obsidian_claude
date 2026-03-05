@@ -105,6 +105,16 @@ class Config:
         return self.get("mcp.timeout", 30)
 
     @property
+    def mcp_max_retries(self) -> int:
+        """Get MCP max retries."""
+        return self.get("mcp.max_retries", 3)
+
+    @property
+    def mcp_retry_delay(self) -> float:
+        """Get MCP retry delay in seconds."""
+        return self.get("mcp.retry_delay", 1.0)
+
+    @property
     def claude_api_key_env(self) -> str:
         """Get environment variable name for Claude API key."""
         return self.get("claude.api_key_env", "ANTHROPIC_API_KEY")
@@ -139,6 +149,11 @@ class Config:
         return self.get("scanning.recent_timeframe", 7)
 
     @property
+    def scanning_timeframe_days(self) -> int:
+        """Alias for scan_timeframe_days."""
+        return self.scan_timeframe_days
+
+    @property
     def check_interval_seconds(self) -> int:
         """Get check interval in seconds."""
         return self.get("scanning.check_interval", 300)
@@ -147,6 +162,16 @@ class Config:
     def max_requests_per_hour(self) -> int:
         """Get maximum requests per hour."""
         return self.get("rate_limit.max_requests_per_hour", 5)
+
+    @property
+    def rate_limit_max_per_hour(self) -> int:
+        """Alias for max_requests_per_hour."""
+        return self.max_requests_per_hour
+
+    @property
+    def state_file(self) -> str:
+        """Get state file path."""
+        return self.get("state.file", "state/processed_requests.json")
 
     @property
     def response_max_length(self) -> int:
@@ -162,6 +187,16 @@ class Config:
     def response_note_suffix(self) -> str:
         """Get response note suffix pattern."""
         return self.get("response.note_suffix", "_response_")
+
+    @property
+    def response_suffix(self) -> str:
+        """Alias for response_note_suffix."""
+        return self.response_note_suffix
+
+    @property
+    def default_allowed_tools(self) -> List[str]:
+        """Get default allowed tools."""
+        return self.get_allowed_tools()
 
     @property
     def notifications_enabled(self) -> bool:
@@ -184,9 +219,19 @@ class Config:
         return self.get("logging.level", "DEBUG")
 
     @property
+    def logging_level(self) -> str:
+        """Alias for log_level."""
+        return self.log_level
+
+    @property
     def log_file(self) -> str:
         """Get log file path."""
         return self.get("logging.file", "logs/agent.log")
+
+    @property
+    def logging_file(self) -> str:
+        """Alias for log_file."""
+        return self.log_file
 
     @property
     def log_max_size(self) -> int:
@@ -194,9 +239,19 @@ class Config:
         return self.get("logging.max_size", 10485760)
 
     @property
+    def logging_max_size(self) -> int:
+        """Alias for log_max_size."""
+        return self.log_max_size
+
+    @property
     def log_backup_count(self) -> int:
         """Get number of log backup files to keep."""
         return self.get("logging.backup_count", 5)
+
+    @property
+    def logging_backup_count(self) -> int:
+        """Alias for log_backup_count."""
+        return self.log_backup_count
 
     @property
     def dry_run(self) -> bool:
