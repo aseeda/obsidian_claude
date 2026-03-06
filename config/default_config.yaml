@@ -1,8 +1,10 @@
 # Obsidian MCP Server Configuration
 mcp:
   server_command: "npx"
-  server_args: ["-y", "@modelcontextprotocol/server-obsidian", "/path/to/vault"]
+  server_args: ["@mauricio.wolff/mcp-obsidian@latest", "/Users/ammare/Library/Mobile Documents/iCloud~md~obsidian/Documents/Life goals"]
   timeout: 30  # seconds
+  max_retries: 3
+  retry_delay: 1.0
 
 # Claude API Configuration
 claude:

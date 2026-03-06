@@ -1,9 +1,9 @@
 # Default permissions for all vaults
 default:
   allowed_tools:
-    - obsidian_read_note
-    - obsidian_search_notes
-    - obsidian_create_note
+    - read_note
+    - search_notes
+    - write_note
     - web_search
     - web_fetch
 
