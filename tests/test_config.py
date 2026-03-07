@@ -26,20 +26,20 @@ class TestConfig:
         config = Config()
 
         # Test existing keys
-        mcp_timeout = config.get("mcp.timeout")
-        assert mcp_timeout is not None
+        obsidian_timeout = config.get("obsidian.timeout")
+        assert obsidian_timeout is not None
 
         # Test non-existing keys with default
         assert config.get("nonexistent.key", "default") == "default"
 
-    def test_mcp_properties(self):
-        """Test MCP-related properties."""
+    def test_obsidian_properties(self):
+        """Test Obsidian CLI-related properties."""
         config = Config()
 
-        assert isinstance(config.mcp_server_command, str)
-        assert isinstance(config.mcp_server_args, list)
-        assert isinstance(config.mcp_timeout, int)
-        assert config.mcp_timeout > 0
+        assert isinstance(config.obsidian_vault_path, str)
+        assert config.obsidian_cli_path is None or isinstance(config.obsidian_cli_path, str)
+        assert isinstance(config.obsidian_timeout, int)
+        assert config.obsidian_timeout > 0
 
     def test_claude_properties(self):
         """Test Claude API properties."""
@@ -73,14 +73,6 @@ class TestConfig:
         assert config.response_max_length == 5000
         assert isinstance(config.response_include_timestamp, bool)
         assert isinstance(config.response_note_suffix, str)
-
-    def test_notification_properties(self):
-        """Test notification properties."""
-        config = Config()
-
-        assert isinstance(config.notifications_enabled, bool)
-        assert isinstance(config.notify_on_success, bool)
-        assert isinstance(config.notify_on_error, bool)
 
     def test_logging_properties(self):
         """Test logging properties."""
@@ -120,7 +112,7 @@ class TestConfig:
         # Create temporary config file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
             temp_config = {
-                "mcp": {"timeout": 99},
+                "obsidian": {"timeout": 99, "vault_path": "/tmp/test"},
                 "claude": {"model": "test-model"},
                 "scanning": {"recent_timeframe": 14}
             }
@@ -129,7 +121,7 @@ class TestConfig:
 
         try:
             config = Config(config_path=temp_path)
-            assert config.get("mcp.timeout") == 99
+            assert config.get("obsidian.timeout") == 99
             assert config.get("claude.model") == "test-model"
             assert config.get("scanning.recent_timeframe") == 14
         finally:
@@ -143,10 +135,10 @@ class TestConfig:
     def test_reload_config(self):
         """Test reloading configuration."""
         config = Config()
-        original_timeout = config.get("mcp.timeout")
+        original_timeout = config.get("obsidian.timeout")
 
         # Reload should not fail
         config.reload()
 
         # Values should still be accessible
-        assert config.get("mcp.timeout") == original_timeout
+        assert config.get("obsidian.timeout") == original_timeout

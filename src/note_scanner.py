@@ -2,7 +2,7 @@
 Note Scanner Module
 
 Scans Obsidian vault for notes containing @claude requests.
-Uses async MCP client for vault operations.
+Uses CLI client for direct file system vault operations.
 """
 
 import logging
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
-from .mcp_client import MCPClient
+from .cli_client import ObsidianCLIClient
 from .request_parser import RequestParser, ClaudeRequest
 from .exceptions import MCPError
 
@@ -38,7 +38,7 @@ class NoteScanner:
 
     def __init__(
         self,
-        mcp_client: MCPClient,
+        cli_client: ObsidianCLIClient,
         request_parser: Optional[RequestParser] = None,
         timeframe_days: int = 7
     ):
@@ -46,15 +46,15 @@ class NoteScanner:
         Initialize the note scanner.
 
         Args:
-            mcp_client: Async MCP client for vault operations
+            cli_client: CLI client for vault operations
             request_parser: Parser for extracting requests (creates default if None)
             timeframe_days: How many days back to scan for modified notes
         """
-        self.mcp_client = mcp_client
+        self.cli_client = cli_client
         self.request_parser = request_parser or RequestParser()
         self.timeframe_days = timeframe_days
 
-    async def scan_for_requests(self) -> List[PendingRequest]:
+    def scan_for_requests(self) -> List[PendingRequest]:
         """
         Scan vault for pending @claude requests.
 
@@ -68,7 +68,7 @@ class NoteScanner:
 
         try:
             # Search for notes containing @claude
-            note_paths = await self._search_notes_with_marker()
+            note_paths = self._search_notes_with_marker()
 
             logger.info(f"Found {len(note_paths)} notes with @claude marker")
 
@@ -77,7 +77,7 @@ class NoteScanner:
 
             for note_path in note_paths:
                 try:
-                    request = await self._extract_request_from_note(note_path)
+                    request = self._extract_request_from_note(note_path)
                     if request:
                         pending_requests.append(request)
                         logger.debug(f"Found pending request in: {note_path}")
@@ -93,7 +93,7 @@ class NoteScanner:
             logger.error(f"Vault scan failed: {e}")
             raise MCPError(f"Failed to scan vault: {e}")
 
-    async def _search_notes_with_marker(self) -> List[str]:
+    def _search_notes_with_marker(self) -> List[str]:
         """
         Search for notes containing @claude marker.
 
@@ -101,14 +101,10 @@ class NoteScanner:
             List of note paths
         """
         try:
-            # Search for @claude in note content
-            results = await self.mcp_client.search_notes(
-                query="@claude",
-                limit=100  # Adjust based on expected volume
-            )
+            # Search for @claude in note content using CLI client
+            results = self.cli_client.search_notes(query="@claude")
 
             # Extract paths from results
-            # The search_notes method returns a list of note info dicts
             note_paths = []
             if isinstance(results, list):
                 for result in results:
@@ -123,7 +119,7 @@ class NoteScanner:
             logger.error(f"Search failed: {e}")
             raise
 
-    async def _extract_request_from_note(
+    def _extract_request_from_note(
         self,
         note_path: str
     ) -> Optional[PendingRequest]:
@@ -137,8 +133,8 @@ class NoteScanner:
             PendingRequest if found, None otherwise
         """
         try:
-            # Read note content
-            content = await self.mcp_client.read_note(note_path)
+            # Read note content using CLI client
+            content = self.cli_client.read_note(note_path)
 
             # Skip if content is empty
             if not content or not content.strip():
@@ -189,7 +185,7 @@ class NoteScanner:
         # For now, return all notes
         return note_paths
 
-    async def get_note_content(self, note_path: str) -> str:
+    def get_note_content(self, note_path: str) -> str:
         """
         Get the full content of a note.
 
@@ -203,6 +199,6 @@ class NoteScanner:
             MCPError: If read fails
         """
         try:
-            return await self.mcp_client.read_note(note_path)
+            return self.cli_client.read_note(note_path)
         except Exception as e:
             raise MCPError(f"Failed to read note {note_path}: {e}")
