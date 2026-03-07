@@ -58,3 +58,6 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+SPECIFICATION.md
+TESTING.md
+CLAUDE.md
