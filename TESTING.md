@@ -20,7 +20,7 @@
 ### Config Tests (15/15 passed)
 - ✅ Configuration loading from YAML files
 - ✅ Dot-notation property access
-- ✅ All configuration properties (MCP, Claude, scanning, rate limit, response, notifications, logging)
+- ✅ All configuration properties (MCP, Claude, scanning, rate limit, response, logging)
 - ✅ Default and vault-specific tool permissions
 - ✅ Custom configuration file support
 - ✅ Error handling for missing files

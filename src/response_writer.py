@@ -2,7 +2,7 @@
 Response Writer Module
 
 Creates and formats response notes in Obsidian vault.
-Uses async MCP client for vault operations.
+Uses CLI client for direct file system vault operations.
 """
 
 import logging
@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 from pathlib import Path
 
-from .mcp_client import MCPClient
+from .cli_client import ObsidianCLIClient
 from .exceptions import MCPError
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class ResponseWriter:
 
     def __init__(
         self,
-        mcp_client: MCPClient,
+        cli_client: ObsidianCLIClient,
         response_suffix: str = "response",
         include_timestamp: bool = True,
         max_response_length: Optional[int] = None
@@ -38,17 +38,17 @@ class ResponseWriter:
         Initialize the response writer.
 
         Args:
-            mcp_client: Async MCP client for vault operations
+            cli_client: CLI client for vault operations
             response_suffix: Suffix for response note filenames
             include_timestamp: Whether to include timestamps in responses
             max_response_length: Maximum response length (None for unlimited)
         """
-        self.mcp_client = mcp_client
+        self.cli_client = cli_client
         self.response_suffix = response_suffix
         self.include_timestamp = include_timestamp
         self.max_response_length = max_response_length
 
-    async def create_response_note(
+    def create_response_note(
         self,
         source_note_path: str,
         request_text: str,
@@ -81,9 +81,9 @@ class ResponseWriter:
             status=status
         )
 
-        # Create the note via MCP
+        # Create the note via CLI client
         try:
-            await self.mcp_client.create_note(
+            self.cli_client.create_note(
                 path=response_path,
                 content=content
             )
@@ -176,7 +176,7 @@ class ResponseWriter:
 
         return "\n".join(sections)
 
-    async def update_source_note(
+    def update_source_note(
         self,
         note_path: str,
         updated_content: str
@@ -192,7 +192,7 @@ class ResponseWriter:
             MCPError: If update fails
         """
         try:
-            await self.mcp_client.update_note(
+            self.cli_client.update_note(
                 path=note_path,
                 content=updated_content
             )

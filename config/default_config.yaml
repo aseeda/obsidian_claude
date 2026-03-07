@@ -1,10 +1,8 @@
-# Obsidian MCP Server Configuration
-mcp:
-  server_command: "npx"
-  server_args: ["@mauricio.wolff/mcp-obsidian@latest", "/Users/ammare/Library/Mobile Documents/iCloud~md~obsidian/Documents/Life goals"]
-  timeout: 30  # seconds
-  max_retries: 3
-  retry_delay: 1.0
+# Obsidian CLI Configuration
+obsidian:
+  vault_path: "/Users/ammare/Library/Mobile Documents/iCloud~md~obsidian/Documents/Life goals"  # Path to Obsidian vault directory
+  cli_path: null  # Optional: Path to Obsidian CLI binary (auto-detects if null)
+  timeout: 30  # Command timeout in seconds
 
 # Claude API Configuration
 claude:
@@ -27,12 +25,6 @@ response:
   max_length: 5000  # characters
   include_timestamp: true
   note_suffix: "_response_"
-
-# Notification Configuration
-notifications:
-  enabled: true
-  on_success: true
-  on_error: true
 
 # Logging Configuration
 logging:

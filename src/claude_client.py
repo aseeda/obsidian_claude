@@ -13,7 +13,6 @@ from anthropic import Anthropic
 from anthropic.types import Message
 
 from .exceptions import ClaudeAPIError, UnauthorizedToolError
-from .mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +34,7 @@ class ClaudeClient:
         model: str = "claude-3-5-sonnet-20241022",
         max_tokens: int = 4096,
         temperature: float = 1.0,
-        allowed_tools: Optional[List[str]] = None,
-        mcp_client: Optional[MCPClient] = None
+        allowed_tools: Optional[List[str]] = None
     ):
         """
         Initialize the Claude client.
@@ -46,8 +44,7 @@ class ClaudeClient:
             model: Claude model to use
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
-            allowed_tools: List of allowed tool names
-            mcp_client: MCP client for providing Obsidian tools
+            allowed_tools: List of allowed tool names (kept for future use)
         """
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
         if not self.api_key:
@@ -58,13 +55,14 @@ class ClaudeClient:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.allowed_tools = set(allowed_tools or [])
-        self.mcp_client = mcp_client
 
         logger.info(f"Initialized Claude client with model: {model}")
 
-    async def process_request(
+    def process_request(
         self,
         request_text: str,
+        context: Optional[str] = None,
+        wikilinks: Optional[List[str]] = None,
         system_prompt: Optional[str] = None
     ) -> str:
         """
@@ -72,6 +70,8 @@ class ClaudeClient:
 
         Args:
             request_text: The user's request
+            context: Optional context from the note (content above the request)
+            wikilinks: Optional list of wikilinks found in context
             system_prompt: Optional system prompt for context
 
         Returns:
@@ -82,11 +82,26 @@ class ClaudeClient:
             UnauthorizedToolError: If Claude attempts to use disallowed tool
         """
         try:
+            # Build user message with context if available
+            user_content = request_text
+
+            if context or wikilinks:
+                context_parts = []
+
+                if wikilinks:
+                    context_parts.append(f"**Referenced notes:** {', '.join(wikilinks)}")
+
+                if context:
+                    context_parts.append(f"**Note context:**\n{context}")
+
+                # Prepend context to request
+                user_content = "\n\n".join(context_parts) + f"\n\n**Request:** {request_text}"
+
             # Build messages
             messages = [
                 {
                     "role": "user",
-                    "content": request_text
+                    "content": user_content
                 }
             ]
 
@@ -101,12 +116,6 @@ class ClaudeClient:
             # Add system prompt if provided
             if system_prompt:
                 kwargs["system"] = system_prompt
-
-            # Add tools if MCP client is available
-            if self.mcp_client and self.allowed_tools:
-                tools = await self._prepare_tools()
-                if tools:
-                    kwargs["tools"] = tools
 
             # Make API call
             logger.info(f"Sending request to Claude (model: {self.model})")
@@ -125,76 +134,6 @@ class ClaudeClient:
             logger.error(f"Claude API error: {e}")
             raise ClaudeAPIError(f"API request failed: {e}")
 
-    async def _prepare_tools(self) -> List[Dict[str, Any]]:
-        """
-        Prepare tool definitions for Claude.
-
-        Returns:
-            List of tool definitions filtered by allowed tools
-        """
-        # Define available Obsidian tools
-        all_tools = [
-            {
-                "name": "read_note",
-                "description": "Read the content of a note from the Obsidian vault",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the note relative to vault root"
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            {
-                "name": "search_notes",
-                "description": "Search for notes in the Obsidian vault by content",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query text"
-                        },
-                        "limit": {
-                            "type": "number",
-                            "description": "Maximum number of results (default: 5)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "write_note",
-                "description": "Create or overwrite a note in the Obsidian vault",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the note relative to vault root"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content of the note"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        ]
-
-        # Filter by allowed tools
-        filtered_tools = [
-            tool for tool in all_tools
-            if tool["name"] in self.allowed_tools
-        ]
-
-        logger.debug(f"Providing {len(filtered_tools)} tools to Claude: {[t['name'] for t in filtered_tools]}")
-        return filtered_tools
-
     def _extract_response_text(self, response: Message) -> str:
         """
         Extract text content from Claude's response.
@@ -205,21 +144,11 @@ class ClaudeClient:
         Returns:
             Response text
         """
-        # Handle different response content types
+        # Extract text content from response
         text_parts = []
-
         for block in response.content:
             if hasattr(block, 'text'):
                 text_parts.append(block.text)
-            elif hasattr(block, 'type') and block.type == 'tool_use':
-                # Check if tool is allowed
-                tool_name = getattr(block, 'name', 'unknown')
-                if tool_name not in self.allowed_tools:
-                    raise UnauthorizedToolError(
-                        f"Claude attempted to use unauthorized tool: {tool_name}"
-                    )
-                # Log tool use
-                logger.warning(f"Claude attempted to use tool: {tool_name}")
 
         return "\n".join(text_parts) if text_parts else ""
 

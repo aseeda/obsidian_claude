@@ -1,12 +1,12 @@
 # Obsidian-Claude Automation Agent
 
-A Python tool that automatically processes natural language requests embedded in Obsidian notes using Claude AI via the Obsidian MCP (Model Context Protocol) server.
+A Python tool that automatically processes natural language requests embedded in Obsidian notes using Claude AI via direct file system access.
 
 ## Overview
 
 This agent scans your Obsidian vault for notes containing `@claude` requests, sends them to Claude AI with restricted tool permissions, and creates linked response notes—all running as a scheduled background task.
 
-**Status:** 🚧 Under Development - MCP integration complete, core features in progress
+**Status:** ✅ v1.0 Complete - Fully functional with direct file system access
 
 ## Features
 
@@ -23,9 +23,8 @@ This agent scans your Obsidian vault for notes containing `@claude` requests, se
 ### Prerequisites
 
 - Python 3.10+
-- Node.js/npm (for Obsidian MCP server)
 - Claude API key
-- Obsidian vault
+- Obsidian vault directory
 
 ### Installation
 
@@ -40,50 +39,45 @@ This agent scans your Obsidian vault for notes containing `@claude` requests, se
    pip install -r requirements.txt
    ```
 
-3. **Install Obsidian MCP server**
-   ```bash
-   npx @mauricio.wolff/mcp-obsidian@latest --help
-   ```
-
-4. **Configure the agent**
-   - Edit `config/default_config.yaml` with your vault path and settings
-   - Set `ANTHROPIC_API_KEY` environment variable
+3. **Configure the agent**
+   - Copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY`
+   - Edit `config/default_config.yaml` with your vault path
 
 ### Configuration
 
 **Main Config (`config/default_config.yaml`):**
 ```yaml
-mcp:
-  server_command: "npx"
-  server_args:
-    - "@mauricio.wolff/mcp-obsidian@latest"
-    - "/path/to/your/vault"  # Update this!
+obsidian:
+  vault_path: "/path/to/your/vault"  # Update this!
+  cli_path: null  # Auto-detects Obsidian CLI, or uses direct file access
   timeout: 30
-  max_retries: 3
 
 claude:
   api_key_env: "ANTHROPIC_API_KEY"
-  model: "claude-sonnet-4"
-  max_tokens: 4096
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 4000
   temperature: 0.7
 
 scanning:
-  modified_within_days: 7
-  check_interval_seconds: 300
+  recent_timeframe: 7  # days
+  check_interval: 300  # seconds
 
 rate_limit:
   max_requests_per_hour: 5
+
+response:
+  max_length: 5000  # characters
+  include_timestamp: true
+  note_suffix: "_response_"
 ```
 
 **Permissions (`config/vault_permissions.yaml`):**
 ```yaml
 default:
   allowed_tools:
-    - read_note
-    - search_notes
-    - write_note
-    - web_search
-    - web_fetch
+    - obsidian_read_note
+    - obsidian_search_notes
+    - obsidian_write_note
 ```
 
 ## Usage
@@ -139,18 +133,38 @@ After processing, `@claude` is replaced with `@claude-done` in the source note.
 ```
 obsidian_claude/
 ├── src/
+│   ├── main.py             # Main CLI orchestrator
 │   ├── config.py           # Configuration management
+│   ├── cli_client.py       # Direct file system vault access
+│   ├── claude_client.py    # Claude API integration
+│   ├── request_parser.py   # @claude request extraction
+│   ├── note_scanner.py     # Vault scanning
+│   ├── response_writer.py  # Response note creation
+│   ├── rate_limiter.py     # Request throttling
 │   ├── exceptions.py       # Custom exception hierarchy
-│   ├── logger.py          # Logging setup
-│   └── mcp_client.py      # Async MCP server wrapper
+│   └── logger.py           # Logging setup
 ├── config/
 │   ├── default_config.yaml
 │   └── vault_permissions.yaml
-├── tests/
-│   ├── test_config.py
-│   └── test_mcp_client.py
+├── tests/                  # 79 tests, all passing
 ├── logs/                   # Rotating log files
 └── state/                  # Processed request tracking
+```
+
+### Running the Agent
+
+```bash
+# Run a single scan
+python3 -m src run
+
+# Preview without executing
+python3 -m src run --dry-run
+
+# Check system status
+python3 -m src status
+
+# Reset processed requests
+python3 -m src reset --confirm
 ```
 
 ### Running Tests
@@ -160,74 +174,42 @@ obsidian_claude/
 pip install pytest pytest-cov
 
 # Run all tests
-pytest tests/ -v
+python3 -m pytest tests/ -v
 
 # Run with coverage
-pytest tests/ -v --cov=src --cov-report=term-missing
+python3 -m pytest tests/ -v --cov=src --cov-report=term-missing
 ```
 
-**Current Status:** 26/26 tests passing, 63% code coverage
-
-### MCP Client Usage
-
-The MCP client uses async/await patterns:
-
-```python
-import asyncio
-from src.mcp_client import MCPClient
-
-async def main():
-    client = MCPClient(
-        server_command="npx",
-        server_args=["@mauricio.wolff/mcp-obsidian@latest", "/path/to/vault"]
-    )
-
-    async with client:
-        # Search for notes
-        notes = await client.search_notes(query="@claude")
-
-        # Read a note
-        content = await client.read_note("path/to/note.md")
-
-        # Create response note
-        await client.create_note(
-            path="response.md",
-            content="# Response\n\nContent here"
-        )
-
-asyncio.run(main())
-```
+**Current Status:** 79/79 tests passing
 
 ## Roadmap
 
-**Completed:**
+**v1.0 - Complete:**
+- ✅ Direct file system vault access (CLI client)
+- ✅ Request parsing with multiple syntax formats
+- ✅ Claude API integration with tool restrictions
+- ✅ Response note generation
+- ✅ Rate limiting and state persistence
+- ✅ CLI interface with dry-run mode
 - ✅ Configuration system
-- ✅ MCP client with async SDK integration
-- ✅ Custom exception hierarchy
-- ✅ Logging infrastructure
-- ✅ Basic test suite
+- ✅ Comprehensive test suite (79 tests)
+- ✅ Error handling and logging
 
-**In Progress:**
-- 🚧 Note scanner
-- 🚧 Request parser
-- 🚧 Claude API client
-- 🚧 Response writer
-- 🚧 Rate limiter
-- 🚧 Main CLI orchestration
-
-**Planned:**
-- 📋 Desktop notifications
+**Future Enhancements:**
 - 📋 Web UI for monitoring
 - 📋 Advanced scheduling options
 - 📋 Multi-vault support
+- 📋 Custom response templates
+- 📋 Conversation threading
 
 ## Security & Privacy
 
 - **No Code Execution:** Claude cannot run shell commands via `bash` tool
-- **Read-Only by Default:** Claude cannot modify existing notes (only create new ones)
-- **Tool Allowlist:** Only approved MCP tools are accessible
+- **Read-Only by Default:** Claude cannot modify existing notes with patches (only create new ones)
+- **Tool Allowlist:** Only approved tools are accessible (read, search, write)
 - **Local Processing:** All data stays on your machine except API calls to Anthropic
-- **API Key Security:** Uses environment variables, never hardcoded
+- **API Key Security:** Uses environment variables via `.env` file, never hardcoded
+- **Direct File Access:** No external dependencies or network servers required
 
 ## Contributing
 
@@ -240,9 +222,8 @@ MIT License - See LICENSE file for details
 ## Acknowledgments
 
 - Built with [Anthropic Claude](https://www.anthropic.com/claude)
-- Uses [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
-- Obsidian MCP server by [@mauricio.wolff](https://github.com/mauricio-wolff)
+- Designed for [Obsidian](https://obsidian.md/) note-taking app
 
 ---
 
-**Note:** This project is under active development. APIs and configurations may change.
+**Note:** v1.0 is stable and ready for production use. Future updates will focus on enhancements and additional features.

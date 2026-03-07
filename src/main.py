@@ -4,21 +4,20 @@ Main CLI Entry Point
 Orchestrates the Obsidian-Claude automation agent.
 """
 
-import asyncio
 import sys
 import argparse
 import logging
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 
 from .config import Config
-from .mcp_client import MCPClient
+from .cli_client import ObsidianCLIClient
 from .claude_client import ClaudeClient
 from .note_scanner import NoteScanner
 from .response_writer import ResponseWriter
 from .request_parser import RequestParser
 from .rate_limiter import RateLimiter
-from .notifier import Notifier
 from .logger import setup_logging
 from .exceptions import (
     ObsidianClaudeError,
@@ -42,25 +41,22 @@ class ObsidianClaudeAgent:
             config: Configuration object
         """
         self.config = config
-        self.mcp_client = None
+        self.cli_client = None
         self.claude_client = None
         self.note_scanner = None
         self.response_writer = None
         self.request_parser = None
         self.rate_limiter = None
-        self.notifier = None
 
-    async def initialize(self) -> None:
+    def initialize(self) -> None:
         """Initialize all components."""
         logger.info("Initializing Obsidian-Claude Agent...")
 
-        # Initialize MCP client
-        self.mcp_client = MCPClient(
-            server_command=self.config.mcp_server_command,
-            server_args=self.config.mcp_server_args,
-            timeout=self.config.mcp_timeout,
-            max_retries=self.config.mcp_max_retries,
-            retry_delay=self.config.mcp_retry_delay
+        # Initialize CLI client
+        self.cli_client = ObsidianCLIClient(
+            vault_path=self.config.obsidian_vault_path,
+            cli_path=self.config.obsidian_cli_path,
+            timeout=self.config.obsidian_timeout
         )
 
         # Initialize Claude client
@@ -68,8 +64,7 @@ class ObsidianClaudeAgent:
             model=self.config.claude_model,
             max_tokens=self.config.claude_max_tokens,
             temperature=self.config.claude_temperature,
-            allowed_tools=self.config.default_allowed_tools,
-            mcp_client=self.mcp_client
+            allowed_tools=self.config.default_allowed_tools
         )
 
         # Initialize request parser
@@ -77,14 +72,14 @@ class ObsidianClaudeAgent:
 
         # Initialize note scanner
         self.note_scanner = NoteScanner(
-            mcp_client=self.mcp_client,
+            cli_client=self.cli_client,
             request_parser=self.request_parser,
             timeframe_days=self.config.scanning_timeframe_days
         )
 
         # Initialize response writer
         self.response_writer = ResponseWriter(
-            mcp_client=self.mcp_client,
+            cli_client=self.cli_client,
             response_suffix=self.config.response_suffix,
             include_timestamp=self.config.response_include_timestamp,
             max_response_length=self.config.response_max_length
@@ -96,14 +91,9 @@ class ObsidianClaudeAgent:
             max_requests_per_hour=self.config.rate_limit_max_per_hour
         )
 
-        # Initialize notifier
-        self.notifier = Notifier(
-            enabled=self.config.notifications_enabled
-        )
-
         logger.info("All components initialized")
 
-    async def run(self, dry_run: bool = False) -> int:
+    def run(self, dry_run: bool = False) -> int:
         """
         Run a single scan and process requests.
 
@@ -114,78 +104,83 @@ class ObsidianClaudeAgent:
             Exit code (0=success, >0=error)
         """
         try:
-            await self.initialize()
+            self.initialize()
 
-            # Connect to MCP server
-            logger.info("Connecting to Obsidian MCP server...")
-            await self.mcp_client.connect()
+            # Connect to vault
+            logger.info("Connecting to Obsidian vault...")
+            self.cli_client.connect()
 
             # Scan for pending requests
-            pending_requests = await self.note_scanner.scan_for_requests()
+            logger.info("Scanning vault for @claude requests...")
+            pending_requests = self.note_scanner.scan_for_requests()
 
             if not pending_requests:
                 logger.info("No pending requests found")
-                self.notifier.notify_processed(0)
                 return 0
 
             logger.info(f"Found {len(pending_requests)} pending request(s)")
 
             if dry_run:
+                print("\n" + "=" * 60)
+                print("DRY RUN: Would process the following requests:")
+                print("=" * 60)
                 logger.info("DRY RUN: Would process the following requests:")
                 for req in pending_requests:
-                    logger.info(f"  - {req.note_path}: {req.request.request_text[:50]}...")
+                    preview = req.request.request_text[:50] + "..." if len(req.request.request_text) > 50 else req.request.request_text
+                    print(f"\n  [{req.note_path}]")
+                    print(f"    Request: {preview}")
+                    if req.request.context:
+                        context_preview = req.request.context[:100] + "..." if len(req.request.context) > 100 else req.request.context
+                        print(f"    Context: {len(req.request.context)} chars")
+                        print(f"    Preview: {context_preview}")
+                    if req.request.wikilinks:
+                        print(f"    Wikilinks: {', '.join(req.request.wikilinks)}")
+                    logger.info(f"  - {req.note_path}: {preview}")
+                print("\n" + "=" * 60 + "\n")
                 return 0
 
             # Process each request
             processed_count = 0
             for pending in pending_requests:
                 try:
-                    await self._process_single_request(pending)
+                    self._process_single_request(pending)
                     processed_count += 1
 
                 except RateLimitExceededError as e:
                     logger.warning(f"Rate limit exceeded: {e}")
                     next_time = self.rate_limiter.get_next_available_time()
                     if next_time:
-                        self.notifier.notify_rate_limit(
-                            next_time.strftime("%Y-%m-%d %H:%M:%S")
-                        )
+                        logger.info(f"Next request available at: {next_time.strftime('%Y-%m-%d %H:%M:%S')}")
                     break  # Stop processing more requests
 
                 except Exception as e:
                     logger.error(f"Failed to process request from {pending.note_path}: {e}")
                     # Mark as error in note
-                    await self._mark_request_error(pending, str(e))
+                    self._mark_request_error(pending, str(e))
                     continue
-
-            # Notify about results
-            self.notifier.notify_processed(processed_count)
 
             logger.info(f"Processing complete: {processed_count} request(s) processed")
             return 0
 
         except MCPConnectionError as e:
             logger.critical(f"MCP connection failed: {e}")
-            self.notifier.notify_error("MCP Connection Failed", str(e))
             return 3
 
         except ClaudeAPIError as e:
             logger.critical(f"Claude API error: {e}")
-            self.notifier.notify_error("Claude API Error", str(e))
             return 4
 
         except Exception as e:
             logger.critical(f"Unexpected error: {e}", exc_info=True)
-            self.notifier.notify_error("Agent Error", str(e))
             return 1
 
         finally:
-            # Disconnect MCP client
-            if self.mcp_client:
-                await self.mcp_client.disconnect()
-                logger.info("Disconnected from MCP server")
+            # Disconnect CLI client
+            if self.cli_client:
+                self.cli_client.disconnect()
+                logger.info("Disconnected from vault")
 
-    async def _process_single_request(self, pending) -> None:
+    def _process_single_request(self, pending) -> None:
         """
         Process a single pending request.
 
@@ -206,13 +201,19 @@ class ObsidianClaudeAgent:
 
         logger.info(f"Processing request from {note_path}")
 
-        # Send to Claude
-        response_text = await self.claude_client.process_request(
-            request_text=request.request_text
+        # Log context information
+        if request.context:
+            logger.debug(f"Including context ({len(request.context)} chars) with {len(request.wikilinks)} wikilinks")
+
+        # Send to Claude with context
+        response_text = self.claude_client.process_request(
+            request_text=request.request_text,
+            context=request.context,
+            wikilinks=request.wikilinks
         )
 
         # Create response note
-        response_path = await self.response_writer.create_response_note(
+        response_path = self.response_writer.create_response_note(
             source_note_path=note_path,
             request_text=request.request_text,
             response_text=response_text,
@@ -227,7 +228,7 @@ class ObsidianClaudeAgent:
             response_link=response_name
         )
 
-        await self.response_writer.update_source_note(
+        self.response_writer.update_source_note(
             note_path=note_path,
             updated_content=updated_content
         )
@@ -241,7 +242,7 @@ class ObsidianClaudeAgent:
 
         logger.info(f"Successfully processed request from {note_path}")
 
-    async def _mark_request_error(self, pending, error_message: str) -> None:
+    def _mark_request_error(self, pending, error_message: str) -> None:
         """
         Mark a request as failed in the source note.
 
@@ -256,7 +257,7 @@ class ObsidianClaudeAgent:
                 error_message=error_message
             )
 
-            await self.response_writer.update_source_note(
+            self.response_writer.update_source_note(
                 note_path=pending.note_path,
                 updated_content=updated_content
             )
@@ -266,7 +267,7 @@ class ObsidianClaudeAgent:
         except Exception as e:
             logger.error(f"Failed to mark error in note: {e}")
 
-    async def status(self) -> int:
+    def status(self) -> int:
         """
         Check and display system status.
 
@@ -274,17 +275,18 @@ class ObsidianClaudeAgent:
             Exit code
         """
         try:
-            await self.initialize()
+            self.initialize()
 
             print("Obsidian-Claude Agent Status")
             print("=" * 40)
 
-            # Check MCP connection
-            print("\n[MCP Server]")
+            # Check vault connection
+            print("\n[Obsidian Vault]")
             try:
-                await self.mcp_client.connect()
+                self.cli_client.connect()
+                print(f"  Path: {self.config.obsidian_vault_path}")
                 print("  Status: ✓ Connected")
-                await self.mcp_client.disconnect()
+                self.cli_client.disconnect()
             except Exception as e:
                 print(f"  Status: ✗ Connection failed: {e}")
 
@@ -308,9 +310,9 @@ class ObsidianClaudeAgent:
             return 1
 
 
-async def async_main(args) -> int:
+def run_agent(args) -> int:
     """
-    Async main function.
+    Run the agent with parsed arguments.
 
     Args:
         args: Parsed command-line arguments
@@ -338,9 +340,9 @@ async def async_main(args) -> int:
 
     # Execute command
     if args.command == 'run':
-        return await agent.run(dry_run=args.dry_run)
+        return agent.run(dry_run=args.dry_run)
     elif args.command == 'status':
-        return await agent.status()
+        return agent.status()
     elif args.command == 'init':
         print("Configuration initialized successfully")
         return 0
@@ -365,6 +367,9 @@ def main() -> int:
     Returns:
         Exit code
     """
+    # Load environment variables from .env file
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
         description="Obsidian-Claude Automation Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -402,9 +407,9 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    # Run async main
+    # Run agent
     try:
-        exit_code = asyncio.run(async_main(args))
+        exit_code = run_agent(args)
         return exit_code
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

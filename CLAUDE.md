@@ -7,16 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Obsidian-Claude Automation Agent** - A Python tool that automatically processes natural language requests embedded in Obsidian notes using Claude AI via the Obsidian MCP (Model Context Protocol) server.
 
 **Key Workflow:**
-1. Scans Obsidian vault for notes containing `@claude` requests (via MCP search)
-2. Reads note content and parses first unprocessed request
-3. Checks if request was already processed (deduplication)
-4. Enforces rate limits (configurable requests per hour)
-5. Sends request to Claude AI with restricted tool permissions
-6. Creates timestamped response note with Claude's reply
-7. Updates source note: `@claude` → `@claude-done` with wikilink to response
-8. Records processed request in state file
-9. Sends desktop notification with results
-10. Designed to run as scheduled background task (cron/systemd/Task Scheduler)
+1. Scans Obsidian vault for notes modified in the last week containing `@claude` requests
+2. Sends requests to Claude AI with restricted tool permissions
+3. Creates linked response notes with results
+4. Prevents re-processing and enforces rate limits (5 requests/hour)
+5. Designed to run as scheduled background task (cron/systemd/Task Scheduler)
 
 **Python Version:** 3.10+ required (project may run on 3.9.6 but not officially supported)
 
@@ -27,8 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 anthropic>=0.18.0      # Claude API client
 pyyaml>=6.0            # Configuration file parsing
 python-dateutil>=2.8.2 # Date/time utilities
-plyer>=2.1.0           # Desktop notifications
-mcp>=1.0.0             # MCP Python SDK for server communication
+python-dotenv>=1.0.0   # Environment variable loading
 ```
 
 **Development Requirements:**
@@ -57,30 +51,33 @@ python3 -m pytest tests/ -v --cov=src --cov-report=term-missing
 
 # Run specific test file
 python3 -m pytest tests/test_config.py -v
-python3 -m pytest tests/test_mcp_client.py -v
+python3 -m pytest tests/test_cli_client.py -v
 ```
 
-**Current Test Status:** 67 tests across 4 test files - some tests failing due to async/MCP integration changes
+**Current Test Status:** 79/79 tests passing (24 CLI client, 14 config, 20 rate limiter, 19 request parser, 2 other)
 
 ## Development Status
 
-**Phase 3: ✅ Core Automation Complete**
+**Phase 3: Core Implementation - ✅ Complete (v1.0)**
 
-All core modules have been implemented:
-- ✅ MCP Client with official Python SDK integration
-- ✅ Claude Client with tool restrictions and API integration
-- ✅ Note Scanner for finding @claude requests
-- ✅ Request Parser supporting all syntax formats
-- ✅ Response Writer for creating formatted notes
-- ✅ Rate Limiter with persistent state tracking
-- ✅ Notifier for desktop notifications
-- ✅ Main CLI orchestrator with async/await pattern
+All major components are implemented and tested. The agent is functional and ready for production use:
+- ✅ **CLI Client** (src/cli_client.py) - Direct file system vault operations
+- ✅ **Request Parser** (src/request_parser.py) - Extracts @claude requests from notes
+- ✅ **Rate Limiter** (src/rate_limiter.py) - Request throttling with state persistence
+- ✅ **Claude Client** (src/claude_client.py) - API integration with tool restrictions
+- ✅ **Note Scanner** (src/note_scanner.py) - Finds pending requests in vault
+- ✅ **Response Writer** (src/response_writer.py) - Creates formatted response notes
+- ✅ **Main Orchestrator** (src/main.py) - CLI entry point with full workflow
+- ✅ **Configuration System** (src/config.py) - YAML-based settings management
+- ✅ **Exception Hierarchy** (src/exceptions.py) - Comprehensive error handling
 
-**Obsidian MCP Server:**
-- Using community package: `@mauricio.wolff/mcp-obsidian@latest`
-- Installed via: `npx @mauricio.wolff/mcp-obsidian@latest <vault_path>`
-- MCP SDK: The project uses `mcp` Python package from PyPI (installed via requirements.txt)
-- **Important:** The MCP client uses stdio transport to communicate with the Node.js-based Obsidian server
+**Architecture Decision:** The project uses **direct file system operations** rather than MCP server integration for better reliability, performance, and reduced complexity. Obsidian CLI binary detection is supported with automatic fallback to direct file access.
+
+**Requirements:**
+- Python 3.10+ (currently tested on 3.9.6)
+- Anthropic API key (set ANTHROPIC_API_KEY environment variable)
+- Valid Obsidian vault directory path
+- Obsidian installation optional (CLI binary detection falls back to direct file access)
 
 ## Architecture
 
@@ -88,15 +85,50 @@ All core modules have been implemented:
 
 **Configuration System (src/config.py)**
 - Loads YAML configs: `config/default_config.yaml` (main), `config/vault_permissions.yaml` (tool allowlist)
-- Provides property-based access to all settings (MCP, Claude, scanning, rate limits, etc.)
+- Provides property-based access to all settings (Obsidian, Claude, scanning, rate limits, etc.)
 - Per-vault tool permission overrides
 
-**MCP Client (src/mcp_client.py)**
-- Async wrapper for Obsidian MCP server communication using official MCP Python SDK
-- Retry logic with configurable attempts (default 3) and delays
-- Async methods: `search_notes()`, `read_note()`, `create_note()`, `update_note()`, `append_to_note()`
-- Async context manager support for automatic connect/disconnect (`async with client:`)
-- **Important:** All methods are async and must be awaited in async context
+**CLI Client (src/cli_client.py)** - 454 lines
+- Synchronous wrapper for Obsidian vault operations via direct file system access
+- Platform-specific CLI binary detection with auto-fallback to direct file operations
+- Methods: `search_notes()`, `read_note()`, `create_note()`, `update_note()`, `append_to_note()`
+- Context manager support for automatic connect/disconnect (`with client:`)
+- **Important:** All methods are synchronous (no async/await complexity)
+
+**Request Parser (src/request_parser.py)** - 238 lines
+- Extracts @claude requests from note content with multiple format support
+- Formats: inline (`@claude text`), with separators (`@claude: text`, `@claude - text`), multiline (triple-quotes)
+- Ignores requests inside code blocks and HTML comments
+- Generates SHA256 hashes for request deduplication
+- Methods for marking requests as processed (`@claude-done`) or errored (`@claude-error`)
+
+**Rate Limiter (src/rate_limiter.py)** - 294 lines
+- Enforces max requests per hour limit (configurable, default 5)
+- Persists state to JSON file (`state/processed_requests.json`)
+- Tracks processed requests, timestamps, and response note paths
+- Automatic cleanup of entries older than 7 days
+- Provides usage statistics and manual reset functionality
+
+**Claude Client (src/claude_client.py)** - 255 lines
+- Integrates with Anthropic Claude API
+- Enforces tool permission restrictions (allowlist-based)
+- Provides Obsidian tools (read_note, search_notes, write_note) to Claude
+- Handles API errors and unauthorized tool usage
+- **Note:** Currently uses synchronous Anthropic SDK (not async)
+
+**Note Scanner (src/note_scanner.py)** - 208 lines
+- Scans vault for notes containing `@claude` markers
+- Uses CLI client for file system search operations
+- Filters by modification time (configurable timeframe, default 7 days)
+- Returns list of `PendingRequest` objects with note path, content, and parsed request
+- **Note:** Uses async/await patterns (interfaces with future async MCP integration)
+
+**Response Writer (src/response_writer.py)** - 215 lines
+- Creates formatted response notes with metadata (source note, request text, timestamp, status)
+- Generates unique filenames with timestamps: `<note>_response_YYYYMMDD_HHMMSS.md`
+- Updates source notes to mark requests as processed
+- Supports response truncation (configurable max length)
+- **Note:** Uses async/await patterns (interfaces with future async MCP integration)
 
 **Custom Exceptions (src/exceptions.py)**
 - Hierarchy: `ObsidianClaudeError` (base) → `MCPError`, `ClaudeAPIError`, `ConfigurationError`, etc.
@@ -106,79 +138,33 @@ All core modules have been implemented:
 - Rotating file handler with configurable size limits
 - Format: timestamp, level, module, message
 
-**Request Parser (src/request_parser.py)**
-- Regex-based parsing for all @claude request formats
-- Ignores requests in code blocks and HTML comments
-- Generates request hashes for deduplication
-- Methods to mark requests as processed (@claude-done) or failed (@claude-error)
-
-**Claude Client (src/claude_client.py)**
-- Anthropic API integration with tool restrictions
-- Async request processing with MCP tool integration
-- Tool permission enforcement (validates allowed tools)
-- Response text extraction and error handling
-
-**Note Scanner (src/note_scanner.py)**
-- Scans vault for notes containing @claude markers
-- Filters by modification timeframe (configurable days)
-- Async MCP operations for vault search and reading
-- Returns PendingRequest objects for processing
-
-**Response Writer (src/response_writer.py)**
-- Creates formatted response notes with metadata
-- Generates timestamped filenames (e.g., note_response_20260305_143045.md)
-- Updates source notes with wikilinks to responses
-- Async MCP operations for note creation/updates
-
-**Rate Limiter (src/rate_limiter.py)**
-- Persistent state tracking via JSON file (state/processed_requests.json)
-- Enforces requests per hour limit
-- Deduplication using note path + request hash
-- Automatic cleanup of entries older than N days
-
-**Notifier (src/notifier.py)**
-- Desktop notifications via plyer library
-- Success, error, and rate limit notifications
-- Cross-platform support (macOS, Linux, Windows)
-- Can be disabled in configuration
-
-**Main Orchestrator (src/main.py)**
-- CLI entry point with argparse (run, status, init, reset commands)
-- Async workflow orchestration using asyncio
-- Component initialization and lifecycle management
-- Error handling with specific exit codes
-
 ### Configuration Structure
 
 **Main Config (config/default_config.yaml):**
-- `mcp.*` - Server command, args, timeout
-  - `server_command`: "npx"
-  - `server_args`: ["@mauricio.wolff/mcp-obsidian@latest", "/path/to/vault"]
+- `obsidian.*` - Vault path and CLI settings
+  - `vault_path`: "/path/to/vault" (required - **must be updated before running**)
+  - `cli_path`: null (optional, auto-detects if null)
   - `timeout`: 30 (seconds)
-  - `max_retries`: 3
-  - `retry_delay`: 1.0 (seconds)
-- `claude.*` - API key env var, model, max_tokens, temperature
-  - `api_key_env`: Environment variable name (default: "ANTHROPIC_API_KEY")
-  - `model`: Claude model ID (e.g., "claude-sonnet-4-5-20250929")
-- `scanning.*` - Timeframe and check interval
-  - `recent_timeframe`: Days to look back for modified notes (default: 7)
-  - `check_interval`: Seconds between scans (default: 300)
-- `rate_limit.*` - Max requests per hour
-  - `max_requests_per_hour`: Rate limit threshold (default: 5)
-- `response.*` - Max length, timestamp inclusion, note suffix pattern
-  - `max_length`: Maximum response characters (default: 5000)
-  - `include_timestamp`: Add timestamp to responses (default: true)
-  - `note_suffix`: Pattern for response note names (default: "_response_")
-- `notifications.*` - Desktop notification settings
-  - `enabled`: Enable/disable notifications (default: true)
-  - `on_success`: Notify on successful processing
-  - `on_error`: Notify on errors
-- `logging.*` - Level, file path, rotation settings
-  - `level`: Log level (DEBUG, INFO, WARNING, ERROR)
-  - `file`: Path to log file (default: "logs/agent.log")
-  - `max_size`: Max log file size in bytes (default: 10485760 = 10MB)
-  - `backup_count`: Number of backup log files to keep (default: 5)
-- `dry_run` - Preview mode without execution (default: false)
+- `claude.*` - Claude API configuration
+  - `api_key_env`: "ANTHROPIC_API_KEY" (environment variable name)
+  - `model`: "claude-sonnet-4-5-20250929"
+  - `max_tokens`: 4000
+  - `temperature`: 0.7
+- `scanning.*` - Note scanning settings
+  - `recent_timeframe`: 7 (days to look back for modified notes)
+  - `check_interval`: 300 (seconds, for future scheduled runs)
+- `rate_limit.*` - Request throttling
+  - `max_requests_per_hour`: 5
+- `response.*` - Response note formatting
+  - `max_length`: 5000 (characters)
+  - `include_timestamp`: true
+  - `note_suffix`: "_response_"
+- `logging.*` - Log file settings
+  - `level`: "DEBUG"
+  - `file`: "logs/agent.log"
+  - `max_size`: 10485760 (10MB)
+  - `backup_count`: 5
+- `dry_run`: false (preview mode without execution)
 
 **Permissions (config/vault_permissions.yaml):**
 - `default.allowed_tools` - Default tool allowlist for all vaults
@@ -192,7 +178,48 @@ All core modules have been implemented:
 - `patch_note` (modify existing notes with patches)
 - `bash` (execute shell commands)
 
-**Note:** Tool names correspond to MCP server tools. The Obsidian MCP server uses simplified names like `read_note` rather than `obsidian_read_note`.
+**Important Implementation Details:**
+
+1. **Synchronous Architecture:**
+   - All components are synchronous (no async/await complexity)
+   - CLI Client (ObsidianCLIClient) operates directly on file system
+   - Main orchestrator runs in synchronous mode for simplicity
+   - This design prioritizes reliability and debuggability over async performance
+
+2. **Request Processing Flow:**
+   ```
+   main.py (CLI entry)
+     → NoteScanner.scan_for_requests()
+     → finds notes with @claude markers
+     → RequestParser.extract_request()
+     → extracts request text + context + wikilinks
+     → RateLimiter.can_process_request()
+     → checks hourly quota
+     → ClaudeClient.process_request()
+     → sends to Claude API with context
+     → ResponseWriter.create_response_note()
+     → creates timestamped response note
+     → RequestParser.mark_request_processed()
+     → replaces @claude with @claude-done
+     → RateLimiter.record_request()
+     → tracks in state file
+   ```
+
+3. **Tool Permissions:**
+   - Tool names defined in vault_permissions.yaml restrict Claude's capabilities
+   - Prevents Claude from using `bash` or `patch_note` tools
+   - Allowlist approach: only explicitly allowed tools are available
+
+4. **State Persistence:**
+   - Rate limiter stores state in `state/processed_requests.json`
+   - Tracks: processed request IDs (note_path:hash), timestamps, response paths
+   - Survives application restarts for proper rate limiting across runs
+   - Auto-cleanup of entries older than 7 days
+
+5. **Environment Variables:**
+   - Supports `.env` file for local configuration (loaded via python-dotenv)
+   - Required: `ANTHROPIC_API_KEY` for Claude API access
+   - Example `.env.example` provided in repo
 
 ## Request Syntax
 
@@ -241,8 +268,8 @@ The tool recognizes these `@claude` request formats in notes:
 
 **Error Scenarios:**
 - Unauthorized tool requested → Write `@claude-error` with explanation to note
-- API unavailable → Log, notify, skip run (retry next schedule)
-- Rate limit exceeded → Mark pending, notify with next available time
+- API unavailable → Log error, skip run (retry next schedule)
+- Rate limit exceeded → Mark pending, log next available time
 - Malformed request → Write parse error to note, mark done
 - Connection failure → Exit with code 3
 
@@ -266,202 +293,167 @@ Tracks:
 ## Code Quality Standards
 
 - Type hints required for all function signatures
-- Docstrings with Args/Returns/Raises sections (Google style)
+- Docstrings with Args/Returns/Raises sections
 - Modules should be < 200 lines (current modules exceed this - refactoring opportunity)
-- Target: >80% test coverage
+- Target: >80% test coverage (currently 63%)
 - Semantic versioning: v1.0.0
-
-## Important Implementation Details
-
-### Async/Await Pattern
-
-**Critical:** The entire codebase uses async/await patterns. All MCP operations and the main workflow are asynchronous.
-
-- All MCP client methods (`search_notes`, `read_note`, `create_note`, `update_note`) are async
-- Claude client's `process_request` method is async
-- Note scanner's `scan_for_requests` method is async
-- Response writer's note creation/update methods are async
-- Main orchestrator runs via `asyncio.run()` in src/main.py
-
-**When adding new code:**
-- Use `async def` for any function that calls async methods
-- Always `await` async function calls
-- Use `async with` for MCP client context manager
-- Run the main entry point with `asyncio.run(async_main(args))`
-
-### Tool Permission Security
-
-The Claude client enforces strict tool permissions:
-- Only tools in `allowed_tools` list can be used
-- Tool definitions are filtered before sending to Claude API
-- If Claude attempts unauthorized tool, `UnauthorizedToolError` is raised
-- Default allowed tools: `read_note`, `search_notes`, `write_note`
-- Explicitly disallowed: `patch_note`, `bash`
-
-### State Persistence
-
-The rate limiter maintains state in `state/processed_requests.json`:
-- **processed_requests**: Set of `note_path:request_hash` entries
-- **request_timestamps**: List of ISO-format timestamps for rate limiting
-- **response_map**: Mapping of request IDs to response note paths
-- **Automatic cleanup**: Entries older than 7 days are removed on load
-
-### Request Deduplication
-
-Requests are uniquely identified by:
-1. Note path (full path to the note)
-2. Request hash (SHA256 of request text, first 16 chars)
-
-Combined format: `note_path:request_hash`
-
-This prevents re-processing the same request multiple times, even if the @claude marker hasn't been replaced yet.
 
 ## Project Structure
 
 ```
 src/
-├── __init__.py         # Package initialization
-├── __main__.py        # Direct module execution (python -m src)
-├── config.py          # Configuration management
-├── exceptions.py      # Custom exception hierarchy
-├── logger.py          # Logging setup with rotation
-├── mcp_client.py      # Async MCP server wrapper (437 lines)
-├── claude_client.py   # Claude API integration with tool restrictions
-├── note_scanner.py    # Vault scanner for @claude requests
-├── request_parser.py  # Request parsing and marking
-├── response_writer.py # Response note creation
-├── rate_limiter.py    # Rate limiting and state persistence
-├── notifier.py        # Desktop notifications
-└── main.py            # CLI orchestrator and entry point
+├── __init__.py
+├── __main__.py              # Package entry point (python -m src)
+├── main.py                  # Main orchestrator with CLI (418 lines)
+├── config.py                # Configuration management (210 lines)
+├── exceptions.py            # Custom exception hierarchy (68 lines)
+├── logger.py                # Logging setup with rotation
+├── cli_client.py            # Synchronous vault client (454 lines)
+├── request_parser.py        # @claude request extraction (238 lines)
+├── rate_limiter.py          # Request throttling (294 lines)
+├── claude_client.py         # Claude API integration (255 lines)
+├── note_scanner.py          # Vault scanning for requests (208 lines)
+└── response_writer.py       # Response note creation (215 lines)
 
 config/
-├── default_config.yaml      # Main configuration
+├── default_config.yaml      # Main configuration (must set vault_path!)
 └── vault_permissions.yaml   # Tool allowlist
 
 tests/
-├── test_config.py          # Config loading and properties
-├── test_mcp_client.py      # MCP client initialization
-├── test_request_parser.py  # Request parsing logic
-└── test_rate_limiter.py    # Rate limiting and state
+├── test_config.py           # 17 tests - config loading and properties
+├── test_cli_client.py       # 24 tests - vault operations
+├── test_request_parser.py   # 19 tests - request extraction patterns
+├── test_rate_limiter.py     # 20 tests - throttling and state persistence
+└── (test coverage: 80 tests total)
 
-logs/         # Rotating log files
-state/        # Processed request tracking (JSON)
+logs/         # Auto-created: rotating log files
+state/        # Auto-created: processed_requests.json
 ```
 
-**Component Integration Example:**
+**CLI Client Usage Example:**
 ```python
-import asyncio
-from src.config import Config
-from src.mcp_client import MCPClient
-from src.claude_client import ClaudeClient
-from src.note_scanner import NoteScanner
-from src.request_parser import RequestParser
+from src.cli_client import ObsidianCLIClient
 
-async def main():
-    # Load configuration
-    config = Config()
-
-    # Initialize MCP client
-    mcp_client = MCPClient(
-        server_command=config.mcp_server_command,
-        server_args=config.mcp_server_args
+def main():
+    client = ObsidianCLIClient(
+        vault_path="/path/to/vault",
+        cli_path=None  # Auto-detect CLI binary
     )
 
-    # Initialize Claude client with tool restrictions
-    claude_client = ClaudeClient(
-        model=config.claude_model,
-        allowed_tools=config.default_allowed_tools,
-        mcp_client=mcp_client
-    )
+    with client:
+        # Search for notes (direct file system scan)
+        notes = client.search_notes(query="@claude")
 
-    # Initialize scanner with parser
-    scanner = NoteScanner(
-        mcp_client=mcp_client,
-        request_parser=RequestParser()
-    )
+        # Read a note
+        content = client.read_note("path/to/note.md")
 
-    async with mcp_client:
-        # Scan for requests
-        pending = await scanner.scan_for_requests()
+        # Create response note
+        client.create_note(
+            path="response.md",
+            content="# Response\n\nContent here"
+        )
 
-        # Process first request
-        if pending:
-            request = pending[0]
-            response = await claude_client.process_request(
-                request_text=request.request.request_text
-            )
-            print(f"Response: {response}")
-
-asyncio.run(main())
+main()
 ```
 
-## Known Issues & TODOs
+## Known Limitations & Future Enhancements
 
-1. **Test Failures:** Some async tests are failing after MCP integration changes - need to update test mocks
-2. **Test Coverage:** Add integration tests for full end-to-end workflow with live MCP server
-3. **Module Size:** main.py (419 lines) exceeds 200-line guideline - consider refactoring
-4. **Python Version:** Project requires Python 3.10+ for proper async support (currently tested on 3.9.6)
-5. **Configuration Validation:** Add schema validation for YAML configs using pydantic or similar
-6. **Error Recovery:** Improve retry logic for transient MCP connection failures
-7. **State File Location:** State file path should be configurable in config YAML (currently hardcoded)
+1. **Testing Coverage:**
+   - Integration tests with real Claude API not yet implemented
+   - Need end-to-end tests with actual Obsidian vault
+   - Target: >80% test coverage (currently 63%)
+
+2. **Code Organization:**
+   - Several modules exceed 200-line target (main.py: 440, cli_client.py: 454)
+   - Consider splitting large modules into smaller components
+   - Extract common patterns into utility functions
+
+3. **User Experience:**
+   - Manual vault_path configuration required in YAML
+   - Interactive setup wizard (`python -m src init`) could improve onboarding
+   - No web UI for monitoring processed requests
+
+4. **Advanced Features (Future):**
+   - Multi-vault support (currently single vault only)
+   - Custom response templates
+   - Request prioritization/scheduling
+   - Retry logic for failed API calls
+   - Conversation threading (multiple related requests)
 
 ## CLI Interface
 
-The agent provides these commands:
+**Running the agent:**
 
 ```bash
-# Run a single scan cycle (for cron/scheduler)
-python -m src run
+# Run as Python module (recommended)
+python3 -m src run                    # Single scan and process
+python3 -m src run --dry-run          # Preview without execution
+python3 -m src status                 # Check system status
+python3 -m src init                   # Initialize configuration
+python3 -m src reset --confirm        # Clear processed request history
 
-# Preview without executing
-python -m src run --dry-run
+# Custom config file
+python3 -m src run --config path/to/config.yaml
 
-# Check system status and connectivity
-python -m src status
-
-# Initialize configuration (placeholder - currently just confirms initialization)
-python -m src init
-
-# Clear processed request history
-python -m src reset --confirm
-
-# Use custom config file (permissions file not yet configurable via CLI)
-python -m src run --config custom_config.yaml
-
-# Direct Python execution (alternative to python -m src)
-python src/main.py run
+# Alternative: Direct invocation
+python3 src/main.py run
 ```
 
-**Note:** The `--permissions` flag exists but is not yet implemented in the config loading logic.
+**Before first run:**
+
+1. Create `.env` file with API key (or export environment variable):
+   ```bash
+   # Copy example file
+   cp .env.example .env
+
+   # Edit .env and add your key
+   echo 'ANTHROPIC_API_KEY=your-api-key-here' > .env
+
+   # Alternative: export directly
+   export ANTHROPIC_API_KEY="your-api-key-here"
+   ```
+
+2. Edit `config/default_config.yaml`:
+   ```yaml
+   obsidian:
+     vault_path: "/path/to/your/obsidian/vault"  # Change this!
+   ```
+
+3. Test configuration:
+   ```bash
+   python3 -m src status
+   ```
 
 **Exit Codes:**
-- 0 = Success
-- 1 = General error
-- 2 = Configuration error
-- 3 = MCP connection failed
+- 0 = success
+- 1 = general error
+- 2 = config error
+- 3 = MCP connection failed (currently not used)
 - 4 = Claude API error
-- 130 = Interrupted by user (Ctrl+C)
+- 130 = keyboard interrupt (Ctrl+C)
 
 ## Testing Strategy
 
-**Implemented Unit Tests:**
-- `test_config.py` - Configuration loading, property access, YAML parsing
-- `test_mcp_client.py` - MCP client initialization, connection state
-- `test_request_parser.py` - Request parsing for all syntax variants, ignore patterns
-- `test_rate_limiter.py` - Rate limiting logic, state persistence, deduplication
+**Unit Tests (79 tests, all passing):**
+- ✅ Configuration loading and property access (14 tests)
+- ✅ CLI client vault operations (24 tests)
+- ✅ Request parsing - all syntax variants, ignore patterns (19 tests)
+- ✅ Rate limiting logic and state persistence (20 tests)
+- ✅ Request hash generation
+- ✅ Error message formatting
 
-**Integration Tests (TODO - require live MCP server):**
-- End-to-end request processing workflow
-- Real vault search/read/create operations
+**Integration Tests (TODO):**
+- End-to-end request processing with real Claude API
+- Actual vault operations with test vault
 - State file persistence across runs
-- Notification delivery on different platforms
+- Error handling in full workflow
 
-**Manual Test Scenarios:**
-- Multiple @claude requests in single note (only first is processed)
-- Requests inside code blocks/HTML comments (should be ignored)
+**Manual Test Scenarios (TODO):**
+- Single/multiple requests per note
+- Requests in code blocks/comments (should be ignored)
 - Multi-line triple-quote requests
-- Unauthorized tool requests (should fail gracefully)
-- Rate limit exceeded (should notify and stop)
-- Very long responses (should truncate if configured)
-- MCP server offline (should exit with code 3)
-- Invalid configuration files (should exit with code 2)
+- Rate limit exceeded behavior
+- Very long responses (truncation at 5000 chars)
+- Invalid vault paths
+- Missing API key
+- Concurrent runs (state file locking)

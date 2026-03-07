@@ -90,29 +90,19 @@ class Config:
         return default_perms.get("allowed_tools", [])
 
     @property
-    def mcp_server_command(self) -> str:
-        """Get MCP server command."""
-        return self.get("mcp.server_command", "npx")
+    def obsidian_vault_path(self) -> str:
+        """Get Obsidian vault path."""
+        return self.get("obsidian.vault_path", "/path/to/vault")
 
     @property
-    def mcp_server_args(self) -> List[str]:
-        """Get MCP server arguments."""
-        return self.get("mcp.server_args", [])
+    def obsidian_cli_path(self) -> Optional[str]:
+        """Get Obsidian CLI binary path (None for auto-detect)."""
+        return self.get("obsidian.cli_path", None)
 
     @property
-    def mcp_timeout(self) -> int:
-        """Get MCP server timeout in seconds."""
-        return self.get("mcp.timeout", 30)
-
-    @property
-    def mcp_max_retries(self) -> int:
-        """Get MCP max retries."""
-        return self.get("mcp.max_retries", 3)
-
-    @property
-    def mcp_retry_delay(self) -> float:
-        """Get MCP retry delay in seconds."""
-        return self.get("mcp.retry_delay", 1.0)
+    def obsidian_timeout(self) -> int:
+        """Get Obsidian CLI timeout in seconds."""
+        return self.get("obsidian.timeout", 30)
 
     @property
     def claude_api_key_env(self) -> str:
@@ -197,21 +187,6 @@ class Config:
     def default_allowed_tools(self) -> List[str]:
         """Get default allowed tools."""
         return self.get_allowed_tools()
-
-    @property
-    def notifications_enabled(self) -> bool:
-        """Get whether notifications are enabled."""
-        return self.get("notifications.enabled", True)
-
-    @property
-    def notify_on_success(self) -> bool:
-        """Get whether to notify on success."""
-        return self.get("notifications.on_success", True)
-
-    @property
-    def notify_on_error(self) -> bool:
-        """Get whether to notify on error."""
-        return self.get("notifications.on_error", True)
 
     @property
     def log_level(self) -> str:

@@ -19,6 +19,13 @@ class ClaudeRequest:
     end_position: int
     request_hash: str
     original_marker: str  # The original @claude marker for replacement
+    context: str = ""  # Content above the request for context
+    wikilinks: list = None  # Wikilinks found in context
+
+    def __post_init__(self):
+        """Initialize wikilinks list if not provided."""
+        if self.wikilinks is None:
+            self.wikilinks = []
 
 
 class RequestParser:
@@ -51,6 +58,7 @@ class RequestParser:
 
     CODE_BLOCK_PATTERN = re.compile(r'```.*?```', re.DOTALL)
     HTML_COMMENT_PATTERN = re.compile(r'<!--.*?-->', re.DOTALL)
+    WIKILINK_PATTERN = re.compile(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]')  # Matches [[link]] or [[link|alias]]
 
     def __init__(self, case_sensitive: bool = True):
         """
@@ -60,6 +68,32 @@ class RequestParser:
             case_sensitive: If True, only match lowercase '@claude'
         """
         self.case_sensitive = case_sensitive
+
+    def _extract_context(self, content: str, start_position: int) -> str:
+        """
+        Extract all content above the request marker.
+
+        Args:
+            content: The full note content
+            start_position: Position where the @claude request starts
+
+        Returns:
+            Content before the request
+        """
+        return content[:start_position].strip()
+
+    def _extract_wikilinks(self, text: str) -> list:
+        """
+        Extract all wikilinks from text.
+
+        Args:
+            text: Text to extract wikilinks from
+
+        Returns:
+            List of note names (without [[ ]])
+        """
+        matches = self.WIKILINK_PATTERN.findall(text)
+        return [match.strip() for match in matches]
 
     def find_first_request(self, content: str) -> Optional[ClaudeRequest]:
         """
@@ -126,12 +160,18 @@ class RequestParser:
         start_pos = match.start()
         end_pos = match.end()
 
+        # Extract context and wikilinks
+        context = self._extract_context(original_content, start_pos)
+        wikilinks = self._extract_wikilinks(context)
+
         return ClaudeRequest(
             request_text=request_text,
             start_position=start_pos,
             end_position=end_pos,
             request_hash=self._generate_hash(request_text),
-            original_marker=match.group(0)
+            original_marker=match.group(0),
+            context=context,
+            wikilinks=wikilinks
         )
 
     def _find_inline_request(
@@ -153,12 +193,18 @@ class RequestParser:
         start_pos = match.start()
         end_pos = match.end()
 
+        # Extract context and wikilinks
+        context = self._extract_context(original_content, start_pos)
+        wikilinks = self._extract_wikilinks(context)
+
         return ClaudeRequest(
             request_text=request_text,
             start_position=start_pos,
             end_position=end_pos,
             request_hash=self._generate_hash(request_text),
-            original_marker=match.group(0)
+            original_marker=match.group(0),
+            context=context,
+            wikilinks=wikilinks
         )
 
     def _generate_hash(self, request_text: str) -> str:
