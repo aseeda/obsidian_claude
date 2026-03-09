@@ -167,6 +167,47 @@ python3 -m src status
 python3 -m src reset --confirm
 ```
 
+### Automated Scheduling
+
+The agent is designed to run periodically via cron. The execution interval is configurable in `config/default_config.yaml` (`scanning.check_interval`).
+
+**Easy Setup (macOS/Linux):**
+
+```bash
+# Install automated scheduling (reads check_interval from config)
+./scripts/setup-cron.sh install
+
+# Check if scheduled task is running
+./scripts/setup-cron.sh status
+
+# Remove scheduled task
+./scripts/setup-cron.sh uninstall
+```
+
+The setup script automatically:
+- Reads `check_interval` from your config (default: 300 seconds = 5 minutes)
+- Creates a crontab entry with the appropriate schedule
+- Configures environment variables and logging
+
+**Logs:**
+- Cron execution logs: `logs/cron.log`
+- Agent logs: `logs/agent.log`
+
+**Monitoring:**
+```bash
+# Watch cron logs in real-time
+tail -f logs/cron.log
+
+# Check agent logs
+tail -f logs/agent.log
+```
+
+**Changing the Schedule:**
+1. Edit `scanning.check_interval` in `config/default_config.yaml`
+2. Reinstall: `./scripts/setup-cron.sh uninstall && ./scripts/setup-cron.sh install`
+
+See [CLAUDE.md](CLAUDE.md#automated-scheduling) for advanced configuration and troubleshooting.
+
 ### Running Tests
 
 ```bash
