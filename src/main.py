@@ -18,10 +18,13 @@ from .note_scanner import NoteScanner
 from .response_writer import ResponseWriter
 from .request_parser import RequestParser
 from .rate_limiter import RateLimiter
+from .image_processor import ImageProcessor
+from .image_extractor import ImageExtractor
 from .logger import setup_logging
 from .exceptions import (
     ObsidianClaudeError,
     MCPConnectionError,
+    MCPError,
     ClaudeAPIError,
     RateLimitExceededError,
     ConfigurationError
@@ -47,6 +50,8 @@ class ObsidianClaudeAgent:
         self.response_writer = None
         self.request_parser = None
         self.rate_limiter = None
+        self.image_processor = None
+        self.image_extractor = None
 
     def initialize(self) -> None:
         """Initialize all components."""
@@ -89,6 +94,21 @@ class ObsidianClaudeAgent:
         self.rate_limiter = RateLimiter(
             state_file=self.config.state_file,
             max_requests_per_hour=self.config.rate_limit_max_per_hour
+        )
+
+        # Initialize image processor
+        self.image_processor = ImageProcessor(
+            vault_path=self.config.obsidian_vault_path,
+            attachment_folders=self.config.get('image_processing.attachment_folders', ['_attachments', 'assets', 'images']),
+            max_file_size_mb=self.config.get('image_processing.max_file_size_mb', 10)
+        )
+
+        # Initialize image extractor
+        self.image_extractor = ImageExtractor(
+            image_processor=self.image_processor,
+            claude_client=self.claude_client,
+            ocr_prompt=self.config.get('image_processing.ocr_extraction.prompt'),
+            max_images_per_request=self.config.get('image_processing.ocr_extraction.max_images_per_request', 5)
         )
 
         logger.info("All components initialized")
@@ -182,7 +202,10 @@ class ObsidianClaudeAgent:
 
     def _process_single_request(self, pending) -> None:
         """
-        Process a single pending request.
+        Process a single pending request with two-phase image processing.
+
+        Phase 1: Extract text from images (if any)
+        Phase 2: Process main request with enhanced context
 
         Args:
             pending: PendingRequest object
@@ -195,24 +218,104 @@ class ObsidianClaudeAgent:
             logger.debug(f"Request already processed: {note_path}")
             return
 
-        # Check rate limit
-        if not self.rate_limiter.can_process_request():
-            raise RateLimitExceededError("Rate limit exceeded")
+        # Calculate total API calls needed
+        image_api_calls = 0
+        if request.image_wikilinks and self.config.get('image_processing.enabled', True):
+            if self.config.get('image_processing.count_ocr_toward_rate_limit', True):
+                # Limit to max_images_per_request if configured
+                max_images = self.config.get('image_processing.ocr_extraction.max_images_per_request', 5)
+                image_api_calls = min(len(request.image_wikilinks), max_images)
 
-        logger.info(f"Processing request from {note_path}")
+        main_request_calls = 1
+        total_api_calls = image_api_calls + main_request_calls
+
+        # Check if we have enough quota for all API calls
+        current_usage = self.rate_limiter.get_current_usage()
+        available_quota = current_usage['remaining_requests']
+
+        if total_api_calls > available_quota:
+            raise RateLimitExceededError(
+                f"Insufficient rate limit quota: need {total_api_calls} API calls "
+                f"({image_api_calls} image OCR + {main_request_calls} main request), "
+                f"but only {available_quota} remaining in current hour"
+            )
+
+        logger.info(f"Processing request from {note_path} (requires {total_api_calls} API call(s))")
+
+        # PHASE 1: Extract text from images (if any) and insert inline
+        extracted_image_text = {}
+        if request.image_wikilinks:
+            logger.info(f"Phase 1: Extracting text from {len(request.image_wikilinks)} image(s)")
+
+            # Check if image processing is enabled
+            if self.config.get('image_processing.enabled', True):
+                # Record each image OCR as a separate API call for rate limiting
+                count_ocr = self.config.get('image_processing.count_ocr_toward_rate_limit', True)
+
+                extracted_image_text = self.image_extractor.extract_text_from_images(
+                    image_filenames=request.image_wikilinks,
+                    source_note_path=note_path
+                )
+
+                # Record API calls for each image processed
+                if count_ocr:
+                    for image_filename in request.image_wikilinks[:len(extracted_image_text)]:
+                        self.rate_limiter.record_request(
+                            note_path=f"{note_path}:image:{image_filename}",
+                            request_hash="ocr",
+                            response_path=None
+                        )
+                        logger.debug(f"Recorded OCR API call for {image_filename}")
+
+                # Insert extracted text under each image in the note
+                if extracted_image_text:
+                    updated_content = self.response_writer.insert_image_text_under_images(
+                        note_content=pending.note_content,
+                        extracted_image_text=extracted_image_text
+                    )
+
+                    # Update the note with extracted image text
+                    self.response_writer.update_source_note(
+                        note_path=note_path,
+                        updated_content=updated_content
+                    )
+
+                    logger.info(f"Phase 1 complete: Inserted extracted text under {len(extracted_image_text)} image(s)")
+
+                    # Re-read the note to get fresh content (positions have shifted)
+                    pending.note_content = self.cli_client.read_note(note_path)
+
+                    # Re-parse to get updated @claude marker positions
+                    request = self.request_parser.find_first_request(pending.note_content)
+                    if not request:
+                        raise MCPError("Request marker not found after image text insertion")
+            else:
+                logger.info("Image processing disabled in config, skipping Phase 1")
+
+        # Build enhanced context with image text (for Claude's context)
+        if extracted_image_text:
+            enhanced_context = self.image_extractor.build_context_with_image_text(
+                original_context=request.context,
+                extracted_image_text=extracted_image_text
+            )
+        else:
+            enhanced_context = request.context
 
         # Log context information
-        if request.context:
-            logger.debug(f"Including context ({len(request.context)} chars) with {len(request.wikilinks)} wikilinks")
+        if enhanced_context:
+            logger.debug(f"Including context ({len(enhanced_context)} chars) with {len(request.wikilinks)} wikilinks")
+            if extracted_image_text:
+                logger.debug(f"Context enhanced with {len(extracted_image_text)} image extraction(s)")
 
-        # Send to Claude with context
+        # PHASE 2: Send main request to Claude and create separate response note
+        logger.info("Phase 2: Processing main request with enhanced context")
         response_text = self.claude_client.process_request(
             request_text=request.request_text,
-            context=request.context,
+            context=enhanced_context,
             wikilinks=request.wikilinks
         )
 
-        # Create response note
+        # Create separate response note
         response_path = self.response_writer.create_response_note(
             source_note_path=note_path,
             request_text=request.request_text,
@@ -220,14 +323,14 @@ class ObsidianClaudeAgent:
             status="Success"
         )
 
-        # Update source note to mark as processed
-        response_name = Path(response_path).stem
+        # Mark @claude as @claude-done with response link
         updated_content = self.request_parser.mark_request_processed(
             content=pending.note_content,
             request=request,
-            response_link=response_name
+            response_link=self.response_writer.extract_note_name(response_path)
         )
 
+        # Update source note with @claude-done marker
         self.response_writer.update_source_note(
             note_path=note_path,
             updated_content=updated_content
@@ -237,10 +340,10 @@ class ObsidianClaudeAgent:
         self.rate_limiter.record_request(
             note_path=note_path,
             request_hash=request.request_hash,
-            response_path=response_path
+            response_path=response_path  # Points to separate response note
         )
 
-        logger.info(f"Successfully processed request from {note_path}")
+        logger.info(f"Successfully processed request from {note_path}, response in {response_path}")
 
     def _mark_request_error(self, pending, error_message: str) -> None:
         """

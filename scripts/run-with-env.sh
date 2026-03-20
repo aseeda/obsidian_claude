@@ -54,8 +54,10 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Obsidian-Claude agent"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Python: $($PYTHON_CMD --version)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Working directory: $PROJECT_ROOT"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Current directory: $(pwd)"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] API key set: $([ -n "$ANTHROPIC_API_KEY" ] && echo 'YES' || echo 'NO')"
 
-# Run the agent
+# Run the agent with verbose logging
 $PYTHON_CMD -m src run
 
 # Log completion

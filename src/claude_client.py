@@ -164,6 +164,67 @@ class ClaudeClient:
         """
         return tool_name in self.allowed_tools
 
+    def process_vision_request(
+        self,
+        prompt: str,
+        image_data: str,
+        mime_type: str = "image/jpeg"
+    ) -> str:
+        """
+        Process a vision request with an image using Claude.
+
+        Args:
+            prompt: The prompt/instruction for image analysis
+            image_data: Base64-encoded image data
+            mime_type: MIME type of the image (e.g., "image/jpeg")
+
+        Returns:
+            Claude's response text
+
+        Raises:
+            ClaudeAPIError: If API request fails
+        """
+        try:
+            # Build multi-modal message with image
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime_type,
+                                "data": image_data
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+
+            # Make API call
+            logger.info(f"Sending vision request to Claude (model: {self.model})")
+            response: Message = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                messages=messages
+            )
+
+            # Extract text response
+            response_text = self._extract_response_text(response)
+
+            logger.info(f"Received vision response ({len(response_text)} chars)")
+            return response_text
+
+        except Exception as e:
+            logger.error(f"Claude Vision API error: {e}")
+            raise ClaudeAPIError(f"Vision API request failed: {e}")
+
     def get_allowed_tools(self) -> List[str]:
         """
         Get list of allowed tools.

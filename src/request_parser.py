@@ -21,11 +21,17 @@ class ClaudeRequest:
     original_marker: str  # The original @claude marker for replacement
     context: str = ""  # Content above the request for context
     wikilinks: list = None  # Wikilinks found in context
+    image_wikilinks: list = None  # Image wikilinks found in context
+    extracted_image_text: dict = None  # Dict mapping filename -> extracted text
 
     def __post_init__(self):
-        """Initialize wikilinks list if not provided."""
+        """Initialize lists and dict if not provided."""
         if self.wikilinks is None:
             self.wikilinks = []
+        if self.image_wikilinks is None:
+            self.image_wikilinks = []
+        if self.extracted_image_text is None:
+            self.extracted_image_text = {}
 
 
 class RequestParser:
@@ -59,6 +65,10 @@ class RequestParser:
     CODE_BLOCK_PATTERN = re.compile(r'```.*?```', re.DOTALL)
     HTML_COMMENT_PATTERN = re.compile(r'<!--.*?-->', re.DOTALL)
     WIKILINK_PATTERN = re.compile(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]')  # Matches [[link]] or [[link|alias]]
+    IMAGE_WIKILINK_PATTERN = re.compile(
+        r'!\[\[([^\]]+\.(?:jpg|jpeg|png|gif|webp))\]\]',
+        re.IGNORECASE
+    )  # Matches ![[image.jpg]] or ![[image.png]], etc.
 
     def __init__(self, case_sensitive: bool = True):
         """
@@ -93,6 +103,19 @@ class RequestParser:
             List of note names (without [[ ]])
         """
         matches = self.WIKILINK_PATTERN.findall(text)
+        return [match.strip() for match in matches]
+
+    def _extract_image_wikilinks(self, text: str) -> list:
+        """
+        Extract all image wikilinks from text.
+
+        Args:
+            text: Text to extract image wikilinks from
+
+        Returns:
+            List of image filenames (without ![[ ]])
+        """
+        matches = self.IMAGE_WIKILINK_PATTERN.findall(text)
         return [match.strip() for match in matches]
 
     def find_first_request(self, content: str) -> Optional[ClaudeRequest]:
@@ -160,9 +183,10 @@ class RequestParser:
         start_pos = match.start()
         end_pos = match.end()
 
-        # Extract context and wikilinks
+        # Extract context, wikilinks, and image wikilinks
         context = self._extract_context(original_content, start_pos)
         wikilinks = self._extract_wikilinks(context)
+        image_wikilinks = self._extract_image_wikilinks(context)
 
         return ClaudeRequest(
             request_text=request_text,
@@ -171,7 +195,8 @@ class RequestParser:
             request_hash=self._generate_hash(request_text),
             original_marker=match.group(0),
             context=context,
-            wikilinks=wikilinks
+            wikilinks=wikilinks,
+            image_wikilinks=image_wikilinks
         )
 
     def _find_inline_request(
@@ -193,9 +218,10 @@ class RequestParser:
         start_pos = match.start()
         end_pos = match.end()
 
-        # Extract context and wikilinks
+        # Extract context, wikilinks, and image wikilinks
         context = self._extract_context(original_content, start_pos)
         wikilinks = self._extract_wikilinks(context)
+        image_wikilinks = self._extract_image_wikilinks(context)
 
         return ClaudeRequest(
             request_text=request_text,
@@ -204,7 +230,8 @@ class RequestParser:
             request_hash=self._generate_hash(request_text),
             original_marker=match.group(0),
             context=context,
-            wikilinks=wikilinks
+            wikilinks=wikilinks,
+            image_wikilinks=image_wikilinks
         )
 
     def _generate_hash(self, request_text: str) -> str:

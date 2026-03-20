@@ -118,15 +118,20 @@ tail -f logs/agent.log
 
 **Synchronous Design:** All components use synchronous operations for reliability and debuggability. No async/await complexity.
 
-**Request Processing Pipeline:**
+**Request Processing Pipeline (with Image OCR):**
 ```
 main.py (CLI entry)
   → NoteScanner.scan_for_requests()          # Find notes with @claude markers (modified in last 7 days)
-  → RequestParser.extract_request()          # Extract request text + context + wikilinks
+  → RequestParser.extract_request()          # Extract request text + context + wikilinks + images
   → RateLimiter.can_process_request()        # Check hourly quota (5/hour)
-  → ClaudeClient.process_request()           # Send to Claude API with context
-  → ResponseWriter.create_response_note()    # Create timestamped response note
-  → RequestParser.mark_request_processed()   # Replace @claude with @claude-done
+
+  PHASE 1 (if images detected):
+  → ImageExtractor.extract_text_from_images() # Send images to Claude Vision API, extract text
+  → Build enhanced context with image text
+
+  PHASE 2:
+  → ClaudeClient.process_request()           # Send main request to Claude with enhanced context
+  → ResponseWriter.append_response_to_note() # Append extracted text + response to source note
   → RateLimiter.record_request()             # Track in state/processed_requests.json
 ```
 
@@ -142,7 +147,19 @@ main.py (CLI entry)
 - Supports multiple `@claude` formats: inline, with separators (`:` or `-`), multiline (triple-quotes)
 - Ignores requests in code blocks and HTML comments
 - Generates SHA256 hashes for deduplication
-- Context extraction: includes full note content + resolves wikilinks for Claude
+- Context extraction: includes full note content + resolves wikilinks + detects image wikilinks
+- **NEW:** Detects image wikilinks (`![[image.jpg]]`) for OCR processing
+
+**ImageProcessor (src/image_processor.py)**
+- Resolves image paths in vault (attachment folders, same directory, vault root)
+- Validates image formats (JPG, PNG, GIF, WebP) and file sizes
+- Reads and base64-encodes images for Claude Vision API
+
+**ImageExtractor (src/image_extractor.py)**
+- Extracts text from images using Claude Vision API (Phase 1)
+- Processes multiple images sequentially
+- Builds enhanced context by combining original text with extracted image text
+- Handles errors gracefully (missing images, API failures)
 
 **RateLimiter (src/rate_limiter.py)**
 - Persistent state in `state/processed_requests.json`
@@ -153,6 +170,7 @@ main.py (CLI entry)
 **ClaudeClient (src/claude_client.py)**
 - Tool permission enforcement via allowlist (config/vault_permissions.yaml)
 - Provides Obsidian tools to Claude: `obsidian_read_note`, `obsidian_search_notes`, `obsidian_write_note`
+- **NEW:** `process_vision_request()` for sending images to Claude Vision API
 - **Explicitly disallowed:** `bash`, `patch_note` (security restriction)
 
 **Config (src/config.py)**
@@ -164,10 +182,13 @@ main.py (CLI entry)
 
 **config/default_config.yaml:**
 - `obsidian.vault_path`: Path to vault directory (**must set before first run**)
-- `claude.model`: "claude-sonnet-4-5-20250929"
+- `claude.model`: "claude-sonnet-4-5-20250929" (supports vision)
 - `scanning.recent_timeframe`: 7 days (only scan recently modified notes)
 - `rate_limit.max_requests_per_hour`: 5
 - `response.max_length`: 5000 characters (truncate long responses)
+- **NEW:** `image_processing.enabled`: Enable/disable image OCR (default: true)
+- **NEW:** `image_processing.max_file_size_mb`: Maximum image size (default: 10MB)
+- **NEW:** `image_processing.attachment_folders`: Folders to search for images
 
 **config/vault_permissions.yaml:**
 - `default.allowed_tools`: List of tools Claude can use
@@ -190,24 +211,92 @@ Supported `@claude` formats in notes (case-sensitive lowercase only):
 **Behavior:**
 - Requests in code blocks/HTML comments are ignored
 - Only first unprocessed request per note is processed per run
-- After processing: `@claude` → `@claude-done` with response link added
+- After processing: `@claude` → `@claude-done` with response appended to same note
 - On error: `@claude` → `@claude-error` with error description
 
 **Context Extraction:**
 - Parser includes full note content as context for Claude
 - Automatically resolves wikilinks and includes linked note content
-- This allows Claude to reference other notes mentioned in the request
+- **NEW:** Automatically detects and extracts text from images in context
+- This allows Claude to reference other notes and images mentioned in the request
 
-## Response Notes
+### Image OCR Processing (NEW)
 
+The agent now supports automatic text extraction from images using Claude's vision capabilities:
+
+**How it works:**
+1. Include images in your note using Obsidian wikilink syntax: `![[image.jpg]]`
+2. Add `@claude` request anywhere below the images
+3. Agent automatically extracts text from images and includes it in context
+4. Claude receives both the image text and your request
+
+**Example Usage:**
+
+```markdown
+# Meeting Notes - 2026-03-19
+
+![[whiteboard_sketch.jpg]]
+![[handwritten_notes.png]]
+
+@claude Summarize the key points from the whiteboard and notes above, and create action items
+```
+
+**After Processing:**
+
+```markdown
+# Meeting Notes - 2026-03-19
+
+![[whiteboard_sketch.jpg]]
+![[handwritten_notes.png]]
+
+@claude-done Summarize the key points from the whiteboard and notes above, and create action items
+
+---
+**Extracted Image Text (2026-03-19 14:32):**
+
+**From whiteboard_sketch.jpg:**
+[Extracted text from whiteboard image]
+
+**From handwritten_notes.png:**
+[Extracted text from handwritten notes]
+
+---
+**Response (2026-03-19 14:32):**
+[Claude's response using the extracted text as context]
+---
+```
+
+**Image Processing Features:**
+- **Supported formats:** JPG, JPEG, PNG, GIF, WebP
+- **Two-phase processing:** Phase 1 extracts image text, Phase 2 processes main request with enhanced context
+- **Auto-detect:** No special syntax needed, just include images above `@claude` marker
+- **Path resolution:** Searches in same directory, attachment folders, and vault root
+- **Error handling:** Gracefully handles missing images or unsupported formats
+- **Rate limiting:** Image OCR requests count toward hourly API quota
+
+**Configuration:**
+```yaml
+image_processing:
+  enabled: true
+  max_file_size_mb: 10
+  attachment_folders: ["_attachments", "assets", "images"]
+  ocr_extraction:
+    max_images_per_request: 5
+```
+
+## Response Format
+
+**NEW Behavior (with image OCR):**
+Responses are now appended directly to the source note after the `@claude-done` marker, containing:
+- Extracted image text (if images were processed)
+- Timestamp
+- Claude's response
+- Separators for readability
+
+**Legacy Behavior (without images):**
+For requests without images, the system can still create separate response notes if configured.
 **Generated filename:** `<source_note>_response_<timestamp>.md`
 Example: `weekly_planning_response_20260227_153045.md`
-
-Contains:
-- Source note wikilink
-- Original request text
-- Timestamp and status
-- Claude's full response (truncated at 5000 chars if configured)
 
 ## Important Implementation Details
 
