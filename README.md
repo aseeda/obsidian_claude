@@ -1,6 +1,6 @@
 # Obsidian-Claude Automation Agent
 
-A Python tool that automatically processes natural language requests embedded in Obsidian notes using Claude AI via direct file system access.
+A Python tool that automatically processes natural language requests embedded in Obsidian notes using Claude AI via direct file system access. The system uses both the text and any images above the request as context to Claude. 
 
 ## Overview
 
